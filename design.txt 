@@ -1,0 +1,269 @@
+PTK_HUIM -- DFS version
+
+I. Fields
+
+a. Configuration // Input from user - immutable
+- databaseFile : String {readOnly}
+- profitFile : String {readOnly}
+- outputFile : String {readOnly}
+- k : int {readOnly}
+- minProbability : double {readOnly}
+- parallel : boolean {readOnly}         // Use to enable/disable parallel mode
+- debug : boolean {readOnly}            // Use to enable/disable debug mode
+
+b. Parsed Data // Compute Values
+- database : List<Transaction>           // Scan from databaseFile
+- profitTable : Map<Integer, Double>    // Scan from profitTable
+- maxItemId : int   // Maximum ID in profitTable
+- denseSize : int   // Number of actual items in data (handle spare ID)
+- itemIdToDense : int[]     // Lookup table for actual id -> dense index
+                            // itemIdToDense[500] -> index = 3 => Use index 3 for mining
+- denseToItem : int[]       // Revise Lookup Table to find actual Id from dense idx
+                            // denseIdToItem[3] -> id = 500
+- profitCache : double[]    // Profit of each item by dense idx
+/*
+    Dense Mapping use for handle Spare data that has 5 items but the maxId can up to millions
+*/
+c. Phase 1 Outputs
+
+// Using [] for essay access and can handle with Fork-Join
+- densePTWU : double[]          // PTWU Map for lookup by dense idx
+- denseLogComp : double[]       // Log Component by dense idx -- prevent underflow
+- validItems : Set<Integer>     // Set of valid item (pruned by EP) -- use Set for O(0) access and prevent duplication
+- sortedItems : List<Integer>   // List of valid item sorted by PTWU
+- rankByItemId : int[]
+- singleItemLists : Map<Integer, UPUList>  // UPU List of single item
+
+/*
+   validItems answer the question "Is item X valid?" when check each transaction
+   sortedItems answer the question "What is the next item?" when mining in Phase 3
+   rankByItemId answer the question "What is X rank?" use for build UPUList buider, reorder item in transaction
+
+   => Use memory for getting better processing speed
+*/
+
+d. Mining Phase and Statistics
+- collector : TopKCollector
+- pool : ForkJoinPool
+- maxMemory : double
+- totalStartTime : double
+- totalEndTime : double
+- phase1Ms, phase2Ms, phase3Ms : double
+
+II. Constants
+- EPSILON : double {readOnly}
+- LOG_ZERO : double {readOnly}
+- LOG_ONE_MINUS_EPS : double {readOnly}
+- LEAF_SIZE : int {readOnly}
+- FINE_GRAIN_THRESHOLD : int {readOnly}
+
+III. Constructor
++ PTKHUIM(
+    databaseFile : String,
+    profitFile  : String,
+    outputFile : String,
+    k : int,
+    minProbability : double,
+    parallel : boolean,
+    debug : boolean
+    )
+
+IV. Inner Class - Data Models
+
+1. Transaction - Represent a transaction in a Database, contain list of <tid, q, p>
+---
+<<private final class>>
+Transaction
+---
+- tid : int
+- q : Map<Integer, Integer>     // quantity of an item in a transaction
+- p : Map<Integer, Double>      // probability of an item in a transaction
+---
++ Transaction(tid, q, p)
++ getItems() : Set<Integer>             // Items is not duplicate
++ getQuantity(item : int): int          // Get quantity of an item in this transaction
++ getProbability(item : int): double    // Get probability of an item in this transaction
++ getItemCount(): int                   // Get number item in this transaction
++ toString() : String
+---
+
+2. ItemInfo - Contain Item information in a Transaction
+---
+<<private final class>>
+ItemInfo
+implements Comparable<ItemInfo>
+---
+- itemId : int {readOnly}
+- rank : int {readOnly}
+- profit : double {readOnly}
+- utility : double {readOnly}
+- logProbability : double {readOnly}
+---
++ ItemInfo(itemId, rank, profit, quantity, logProb)
++ compareTo(o) : int
++ toString() : String
+---
+
+3. TransactionEntry - Entry in each UPUList
+---
+<<private final class>>
+TransactionEntry
+implements Comparable<TransactionEntry>
+---
+- tid : int {readOnly}
+- utility : double {readOnly}
+- remainingUtility : double {readOnly}
+- logProbability : double {readOnly}
+---
++ TransactionEntry(tid, utility, remaining, logProb)
++ compareTo(o) : int
+---
+
+4. UPUList
+---
+<<private final class>>
+UPUList
+---
+- itemset : Set<Integer> {readOnly}
+- transactionIDs : int[] {readOnly}
+- utilities : double[] {readOnly}
+- remainingUtilities : double[] {readOnly}
+- logProbabilities : double[] {readOnly}
+- entryCount : int {readOnly}   // Number of transaction contains X
+- ptwu : double {readOnly}
+- eu : double {readOnly}
+- ep : double {readOnly}
+- pub : double {readOnly}
+---
++ UPUList(itemset, tids, u, ru, lp, count, ptwu, eu, ep, pub)
++ toString : String
+---
+
+
+5. Pattern - Discovered high-utility pattern.
+---
+<<private final class>>
+Pattern
+implements Comparable<Pattern>
+---
+- items : Set<Integer> {readOnly}
+- eu : double {readOnly}
+- ep : double {readOnly}
+- sortedItems : List<Integer> {readOnly} //Consider to change to TreeSet
+---
+- Pattern(items, eu, ep)
+- compareTo(o) : int        // so sanh thu tu
+- equals(obj) : boolean     // so sanh content, true khi Hashcode equal
+- hashCode() : int          // tao ma dai dien cho obj, override cùng với equals
+- toString() : String
+---
+
+6. MiningResult - encapsulate final mining result for clear return
+---
+<<private final class>>
+MiningResult
+---
+- patterns : List<patterns> {readOnly}
+- executionTimeMs : long {readOnly}
+- memoryUsedMB : double {readOnly}
+- validItemCount : int {readOnly}
+- upuListCount : int {readOnly}
+- databaseSize : int {readOnly}
+- phase1Ms, phase2Ms, phase3Ms : long {readOnly}
+---
+- MiningResult(patterns, executionTimeMs, memoryUsedMB, validItemCount, upuListCount, databaseSize, phase1Ms, phase2Ms, phase3Ms)
+---
+
+7. TopKCollector
+---
+<<private final class>>
+TopKCollector
+---
+- capacity : int {readOnly}
+- heap : TreeSet<Pattern> {readOnly}
+- index : HashMap<Set<Integer>, Pattern> {readOnly}
+- lock : ReentrantLock {readOnly}
+- admissionThreshold : double {readOnly}
+---
+- TopKCollector(k)
+- tryCollect(UPUList Candidate) : boolean
+- updateThreshold() : void
+- getResults() : List<Pattern>
+- getThreshold() : double
+- size() : int
+---
+
+8. ForkJoin task
+a. Phase1Task
+---
+<<private final class>>
+Phase1Task
+extends RecursiveTask<double[][]>
+---
+- from, to : int {readOnly}
+---
+- Phase1Task(from, to)
+# compute() : double[][]
+---
+
+b. EntryCollectionTask
+---
+<<private final class>>
+EntryCollectionTask
+extends RecursiveTask<Map<Integer, List<TransactionEntry>>>
+---
+- from, to : int {readOnly}
+---
+- Phase1Task(from, to)
+# compute() : Map<Integer, List<TransactionEntry>>
+---
+
+c. DFSMiningTask
+---
+<<private final class>>
+DFSMiningTask
+extends RecursiveAction
+---
+- rangeStart, rangeEnd : int {readOnly}
+---
+- DFSMiningTask(start, end)
+# compute() : void
+---
+IV. Entry point
+
++ main : void
++ run : MiningResult
+
+V. I/O
+- readProfitTable : void
+- readDatabase : void
+- writeResults : void
+- printStats : void
+
+VI. Processing
+
+a. Phase 1
+- computePTWU_EP : void
+- processTransactionPhase1 : void
+- filterAndRankItems : void
+- buildUPULists : void
+- collectEntriesRange : Map<Integer, List<TransactionEntry>>
+- extractSortedItems : List<ItemInfo>
+- computeSuffixSums : double[]
+- buildUPUListFromEntries : UPUList
+
+b. Phase 2
+- evaluateOneItemsets : void
+
+c. Phase 3
+- mineParallel : void
+- mineSequential : void
+- findPTWUSplit : int
+- exploreExtensions : void
+- joinTwoPointer : UPUList
+
+VII. Utility methods
+- logComplement : double
+- computeEP : double
+- debugLog : void
+- checkMemory : void
