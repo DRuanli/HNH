@@ -15,8 +15,7 @@ import java.util.concurrent.locks.ReentrantLock;
  * <h3>Algorithm Configuration</h3>
  * <ul>
  *   <li><b>Search strategy:</b>  Depth-First Search (DFS) prefix-growth</li>
- *   <li><b>Join strategy:</b>    Two-pointer merge with inline EU/PUB aggregation
- *       and deferred EP computation (zero transcendental calls in join loop)</li>
+ *   <li><b>Join strategy:</b>    Two-pointer merge with inline EU/EP/PUB aggregation</li>
  *   <li><b>Top-K collector:</b>  Baseline (TreeSet min-heap + HashMap dedup)</li>
  *   <li><b>Parallelism:</b>      ForkJoin work-stealing (Phase 1a, 1d, 3)</li>
  * </ul>
@@ -27,7 +26,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *       build single-item UPU-Lists</li>
  *   <li><b>Phase 2 - Initialization:</b> Evaluate 1-itemsets, seed the Top-K collector</li>
  *   <li><b>Phase 3 - Mining:</b> Recursive DFS prefix-growth with three-tier pruning:
- *       PTWU (monotone UB), PUB (tighter UB), EP (anti-monotone, deferred)</li>
+ *       EP (anti-monotone), PTWU (monotone UB), PUB (tighter UB)</li>
  * </ol>
  *
  * <h3>Input Format</h3>
@@ -57,7 +56,7 @@ public class PTK_HUIM_DFS {
     private static final int LEAF_SIZE = 256;
 
     /** Prefix count threshold for fine-grain ForkJoin decomposition (Phase 3). */
-    private static final int FINE_GRAIN_THRESHOLD = 32;
+    private static final int FINE_GRAIN_THRESHOLD = 16;
 
     // =========================================================================
     // Inner Classes - Data Models
@@ -146,35 +145,28 @@ public class PTK_HUIM_DFS {
      * UPU-List: transactional projection of one itemset onto the database.
      *
      * Arrays are TID-sorted for O(n) two-pointer join. Pre-aggregated statistics
-     * (EU, EP, PTWU, PUB) are computed during construction or deferred.
-     *
-     * <p>Probabilities are stored directly (not in log-space) to enable O(1)
-     * multiplication during joins instead of expensive Math.exp() calls.
-     * EP computation is deferred until after PTWU/PUB pruning passes,
-     * avoiding costly Math.log1p() calls for joins that will be pruned.</p>
-     *
-     * Immutable after EP resolution - safe for concurrent reads in Phase 3.
+     * (EU, EP, PTWU, PUB) are computed in one linear pass at construction.
+     * Immutable after construction - safe for concurrent reads in Phase 3.
      */
     private static final class UPUList {
         final Set<Integer> itemset;
         final int[] transactionIds;
         final double[] utilities;
         final double[] remainingUtilities;
-        final double[] probabilities;
+        final double[] logProbabilities;
         final int entryCount;
         final double ptwu;
         final double expectedUtility;
-        /** EP: set at construction for 1-itemsets, deferred for joined lists. */
-        double existentialProbability;
+        final double existentialProbability;
         final double positiveUpperBound;
 
         UPUList(Set<Integer> itemset, int[] tids, double[] utils, double[] remaining,
-                double[] probs, int count, double ptwu, double eu, double ep, double pub) {
+                double[] logProbs, int count, double ptwu, double eu, double ep, double pub) {
             this.itemset = itemset;
             this.transactionIds = tids;
             this.utilities = utils;
             this.remainingUtilities = remaining;
-            this.probabilities = probs;
+            this.logProbabilities = logProbs;
             this.entryCount = count;
             this.ptwu = ptwu;
             this.expectedUtility = eu;
@@ -770,16 +762,15 @@ public class PTK_HUIM_DFS {
                                                     List<TransactionEntry> entries, double ptwu) {
         int n = entries.size();
         int[] tids = new int[n]; double[] utils = new double[n];
-        double[] rem = new double[n]; double[] probs = new double[n];
+        double[] rem = new double[n]; double[] logProbs = new double[n];
         double sumEU = 0, posUB = 0, logComp = 0;
 
         for (int i = 0; i < n; i++) {
             TransactionEntry e = entries.get(i);
             tids[i] = e.tid; utils[i] = e.utility;
-            rem[i] = e.remainingUtility;
+            rem[i] = e.remainingUtility; logProbs[i] = e.logProbability;
 
             double prob = Math.exp(e.logProbability);
-            probs[i] = prob;
             sumEU += e.utility * prob;
             double total = e.utility + e.remainingUtility;
             if (total > 0) posUB += prob * total;
@@ -792,7 +783,7 @@ public class PTK_HUIM_DFS {
             }
         }
         double ep = (logComp <= LOG_ZERO) ? 1.0 : 1.0 - Math.exp(logComp);
-        return new UPUList(itemset, tids, utils, rem, probs, n, ptwu, sumEU, ep, posUB);
+        return new UPUList(itemset, tids, utils, rem, logProbs, n, ptwu, sumEU, ep, posUB);
     }
 
     // =========================================================================
@@ -850,13 +841,10 @@ public class PTK_HUIM_DFS {
     /**
      * Recursively explores all extensions of prefix in PTWU-ascending order.
      *
-     * Three-tier pruning (reordered for deferred EP optimization):
-     *   1. PTWU - monotone upper bound (PTWU >= EU for all supersets), O(1)
-     *   2. PUB  - tighter upper bound (PUB >= EU, closer to actual EU), O(1)
-     *   3. EP   - anti-monotone, deferred: computed ONLY after PTWU+PUB pass, O(count)
-     *
-     * By deferring EP computation, Math.log1p() calls are avoided entirely
-     * for joins that fail the cheaper PTWU or PUB checks.
+     * Three-tier pruning (ordered cheapest to most expensive):
+     *   1. EP   - anti-monotone (EP only decreases with itemset growth)
+     *   2. PTWU - monotone upper bound (PTWU >= EU for all supersets)
+     *   3. PUB  - tighter upper bound (PUB >= EU, closer to actual EU)
      *
      * Threshold refreshed after each successful collection and after each
      * recursive subtree returns, enabling progressively more aggressive pruning.
@@ -864,28 +852,22 @@ public class PTK_HUIM_DFS {
     private void exploreExtensions(UPUList prefix, int startIndex) {
         double threshold = collector.getThreshold();
         if (prefix.ptwu < threshold - EPSILON) return;
-        if (prefix.positiveUpperBound < threshold - EPSILON) return;
 
         int itemCount = sortedItems.size();
         for (int i = startIndex; i < itemCount; i++) {
             int extItem = sortedItems.get(i);
             UPUList extList = singleItemLists.get(extItem);
             if (extList == null) continue;
-            threshold = collector.getThreshold();
 
             UPUList joined = joinTwoPointer(prefix, extList, extItem, threshold);
             if (joined == null || joined.entryCount == 0) continue;
 
-            // Tier 1: PTWU pruning (monotone UB) — O(1), pre-computed in join
+            // Tier 1: EP pruning (anti-monotone)
+            if (joined.existentialProbability < minProbability - EPSILON) continue;
+            // Tier 2: PTWU pruning (monotone UB)
             if (joined.ptwu < threshold - EPSILON) continue;
-            // Tier 2: PUB pruning (tighter UB) — O(1), pre-computed in join
+            // Tier 3: PUB pruning (tighter UB)
             if (joined.positiveUpperBound < threshold - EPSILON) continue;
-
-            // Tier 3: EP pruning (anti-monotone) — deferred, O(count)
-            // Only computed here because PTWU and PUB already passed.
-            double ep = computeEPFromProbs(joined.probabilities, joined.entryCount);
-            if (ep < minProbability - EPSILON) continue;
-            joined.existentialProbability = ep;
 
             // Admission: only collect patterns with EU >= threshold.
             // Threshold starts at 0 — effectively EU >= 0 until heap fills.
@@ -895,23 +877,17 @@ public class PTK_HUIM_DFS {
             }
 
             exploreExtensions(joined, i + 1);
-            //threshold = collector.getThreshold();
+            threshold = collector.getThreshold();
         }
     }
 
     // =========================================================================
-    // Two-Pointer UPU-List Join with Inline EU/PUB Aggregation (EP Deferred)
+    // Two-Pointer UPU-List Join with Inline EU/EP/PUB Aggregation
     // =========================================================================
 
     /**
      * Joins prefix UPU-List with single-item extension UPU-List.
-     * O(|L1| + |L2|) two-pointer merge computing EU and PUB inline.
-     *
-     * <p><b>Optimization:</b> Probabilities are multiplied directly (prob1 × prob2)
-     * instead of computing exp(logP1 + logP2), eliminating all Math.exp() calls.
-     * EP computation is deferred — not computed here. The returned UPUList has
-     * EP = -1.0 (sentinel). Caller must invoke {@link #computeEPFromProbs}
-     * after PTWU/PUB pruning passes.</p>
+     * O(|L1| + |L2|) two-pointer merge computing EU, EP, PUB inline.
      */
     private static UPUList joinTwoPointer(UPUList list1, UPUList list2,
                                            int extensionItem, double threshold) {
@@ -920,64 +896,50 @@ public class PTK_HUIM_DFS {
 
         int maxCount = Math.min(list1.entryCount, list2.entryCount);
         int[] tids = new int[maxCount]; double[] utils = new double[maxCount];
-        double[] rems = new double[maxCount]; double[] probs = new double[maxCount];
-        double sumEU = 0, posUB = 0;
+        double[] rems = new double[maxCount]; double[] logPs = new double[maxCount];
+        double sumEU = 0, posUB = 0, logComp = 0;
         int count = 0, i = 0, j = 0;
 
         int[] t1 = list1.transactionIds, t2 = list2.transactionIds;
         double[] u1 = list1.utilities, u2 = list2.utilities;
         double[] r1 = list1.remainingUtilities, r2 = list2.remainingUtilities;
-        double[] p1 = list1.probabilities, p2 = list2.probabilities;
+        double[] lp1 = list1.logProbabilities, lp2 = list2.logProbabilities;
 
         while (i < list1.entryCount && j < list2.entryCount) {
             if (t1[i] == t2[j]) {
                 double u = u1[i] + u2[j];
                 double r = Math.min(r1[i], r2[j]);
-                double prob = p1[i] * p2[j];
+                double lp = lp1[i] + lp2[j];
                 tids[count] = t1[i]; utils[count] = u;
-                rems[count] = r; probs[count] = prob; count++;
+                rems[count] = r; logPs[count] = lp; count++;
 
+                double prob = Math.exp(lp);
                 sumEU += u * prob;
                 double total = u + r;
                 if (total > 0) posUB += prob * total;
 
+                if (lp > LOG_ONE_MINUS_EPS) { logComp = LOG_ZERO; }
+                else if (logComp >= LOG_ZERO) {
+                    double l1p = (prob < 0.5) ? Math.log1p(-prob) : Math.log(1.0 - prob);
+                    logComp += l1p;
+                    if (logComp < LOG_ZERO) logComp = LOG_ZERO;
+                }
                 i++; j++;
             } else if (t1[i] < t2[j]) { i++; } else { j++; }
         }
 
         if (count == 0) return null;
+        double ep = (logComp <= LOG_ZERO) ? 1.0 : 1.0 - Math.exp(logComp);
         int sz = list1.itemset.size() + 1;
         Set<Integer> itemset = new HashSet<>((sz * 4) / 3 + 1);
         itemset.addAll(list1.itemset);
         itemset.add(extensionItem);
-        // EP = -1.0 sentinel: deferred until after PTWU/PUB pruning
-        return new UPUList(itemset, tids, utils, rems, probs, count,
-                joinedPTWU, sumEU, -1.0, posUB);
+        return new UPUList(itemset, tids, utils, rems, logPs, count, joinedPTWU, sumEU, ep, posUB);
     }
 
     // =========================================================================
     // Utility Methods
     // =========================================================================
-
-    /**
-     * Computes Existential Probability from pre-stored probability values.
-     * Used for deferred EP computation after PTWU/PUB pruning passes.
-     *
-     * <p>EP = 1 - Π(1 - prob_i), computed in log-space for numerical stability:
-     * logComp = Σ log(1 - prob_i), then EP = 1 - exp(logComp).</p>
-     */
-    private static double computeEPFromProbs(double[] probs, int count) {
-        double logComp = 0;
-        for (int i = 0; i < count; i++) {
-            double prob = probs[i];
-            if (prob >= 1.0 - EPSILON) return 1.0;
-            if (logComp <= LOG_ZERO) break;
-            double l1p = (prob < 0.5) ? Math.log1p(-prob) : Math.log(1.0 - prob);
-            logComp += l1p;
-            if (logComp < LOG_ZERO) logComp = LOG_ZERO;
-        }
-        return (logComp <= LOG_ZERO) ? 1.0 : 1.0 - Math.exp(logComp);
-    }
 
     private static double logComplement(double probability) {
         if (probability <= 0) return 0.0;
