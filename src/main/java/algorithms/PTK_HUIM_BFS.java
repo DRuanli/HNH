@@ -6,7 +6,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * PTK-HUIM (DFS): Exact Top-K High-Utility Itemset Mining on Uncertain Databases
+ * PTK-HUIM (BFS): Exact Top-K High-Utility Itemset Mining on Uncertain Databases
  *
  * A standalone, self-contained implementation for mining the K itemsets with
  * highest Expected Utility (EU) from an uncertain transaction database where
@@ -14,7 +14,10 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * <h3>Algorithm Configuration</h3>
  * <ul>
- *   <li><b>Search strategy:</b>  Depth-First Search (DFS) prefix-growth</li>
+ *   <li><b>Search strategy:</b>  Breadth-First Search (BFS) prefix-growth using a
+ *       FIFO queue. Because each extension adds exactly one item, BFS naturally
+ *       processes all 2-itemsets before any 3-itemset, all 3-itemsets before any
+ *       4-itemset, and so on (level-order traversal).</li>
  *   <li><b>Join strategy:</b>    Two-pointer merge with inline EU/PUB aggregation
  *       and deferred EP computation (zero transcendental calls in join loop)</li>
  *   <li><b>Top-K collector:</b>  Baseline (TreeSet min-heap + HashMap dedup)</li>
@@ -26,9 +29,17 @@ import java.util.concurrent.locks.ReentrantLock;
  *   <li><b>Phase 1 - Preprocessing:</b> Compute PTWU/EP, filter items, rank by PTWU,
  *       build single-item UPU-Lists</li>
  *   <li><b>Phase 2 - Initialization:</b> Evaluate 1-itemsets, seed the Top-K collector</li>
- *   <li><b>Phase 3 - Mining:</b> Recursive DFS prefix-growth with three-tier pruning:
- *       PTWU (monotone UB), PUB (tighter UB), EP (anti-monotone, deferred)</li>
+ *   <li><b>Phase 3 - Mining:</b> Breadth-First prefix-growth with three-tier pruning:
+ *       PTWU (monotone UB), PUB (tighter UB), EP (anti-monotone, deferred).
+ *       Stale nodes are pruned at dequeue time against the dynamic threshold.</li>
  * </ol>
+ *
+ * <h3>Key Difference from DFS</h3>
+ * <p>DFS explores one branch completely before backtracking (depth-first). BFS
+ * explores all patterns of size k before any pattern of size k+1 (level-order).
+ * If many high-utility patterns are small (e.g., individual items or pairs with
+ * high profit × probability), BFS finds them early and raises the threshold
+ * faster than DFS would — at the cost of O(frontier) memory instead of O(depth).</p>
  *
  * <h3>Input Format</h3>
  * <pre>
@@ -38,7 +49,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *
  * @author Elio (flattened from PTK-HUIM clean architecture)
  */
-public class PTK_HUIM_DFS {
+public class PTK_HUIM_BFS {
 
     // =========================================================================
     // Constants
@@ -191,6 +202,27 @@ public class PTK_HUIM_DFS {
 
     // =========================================================================
     // Inner Classes - Result Models
+    // =========================================================================
+
+    /**
+     * Represents a node in the BFS FIFO queue frontier.
+     *
+     * Each node holds the UPU-List of the current prefix and the first
+     * extension index to consider. Nodes are processed in FIFO order,
+     * ensuring level-by-level (breadth-first) exploration.
+     */
+    private static final class SearchNode {
+        final UPUList list;
+        final int startIndex;
+
+        SearchNode(UPUList list, int startIndex) {
+            this.list = list;
+            this.startIndex = startIndex;
+        }
+    }
+
+    // =========================================================================
+    // Inner Classes - Result Models (continued)
     // =========================================================================
 
     /**
@@ -396,13 +428,13 @@ public class PTK_HUIM_DFS {
     }
 
     /**
-     * Phase 3: parallel prefix-based DFS mining via ForkJoin.
+     * Phase 3: parallel prefix-based BFS mining via ForkJoin.
      * Decomposition: single prefix -> direct mine; small range -> per-item tasks;
      * large range -> PTWU-weighted binary split.
      */
-    private final class DFSMiningTask extends RecursiveAction {
+    private final class BFSMiningTask extends RecursiveAction {
         final int rangeStart, rangeEnd;
-        DFSMiningTask(int start, int end) { this.rangeStart = start; this.rangeEnd = end; }
+        BFSMiningTask(int start, int end) { this.rangeStart = start; this.rangeEnd = end; }
 
         @Override
         protected void compute() {
@@ -412,14 +444,14 @@ public class PTK_HUIM_DFS {
                 return;
             }
             if (size <= FINE_GRAIN_THRESHOLD) {
-                List<DFSMiningTask> tasks = new ArrayList<>(size);
+                List<BFSMiningTask> tasks = new ArrayList<>(size);
                 for (int i = rangeStart; i < rangeEnd; i++)
-                    tasks.add(new DFSMiningTask(i, i + 1));
+                    tasks.add(new BFSMiningTask(i, i + 1));
                 invokeAll(tasks);
             } else {
                 int split = findPTWUSplit(rangeStart, rangeEnd);
-                invokeAll(new DFSMiningTask(rangeStart, split),
-                          new DFSMiningTask(split, rangeEnd));
+                invokeAll(new BFSMiningTask(rangeStart, split),
+                          new BFSMiningTask(split, rangeEnd));
             }
         }
 
@@ -481,7 +513,7 @@ public class PTK_HUIM_DFS {
     // Constructor
     // =========================================================================
 
-    public PTK_HUIM_DFS(String databaseFile, String profitFile, String outputFile,
+    public PTK_HUIM_BFS(String databaseFile, String profitFile, String outputFile,
                          int k, double minProbability, boolean parallel, boolean debug) {
         this.databaseFile = databaseFile;
         this.profitFile = profitFile;
@@ -498,18 +530,18 @@ public class PTK_HUIM_DFS {
 
     public static void main(String[] args) throws Exception {
         if (args.length < 4) {
-            System.err.println("Usage: java PTK_HUIM_DFS <database> <profits> <k> <minProb> " +
+            System.err.println("Usage: java PTK_HUIM_BFS <database> <profits> <k> <minProb> " +
                     "[output] [--no-parallel] [--debug]");
             System.err.println();
             System.err.println("Example:");
-            System.err.println("  java PTK_HUIM_DFS data/chess_db.txt data/chess_profits.txt 100 0.1 --debug");
+            System.err.println("  java PTK_HUIM_BFS data/chess_db.txt data/chess_profits.txt 100 0.1 --debug");
             System.exit(1);
         }
 
         String db = args[0], prof = args[1];
         int k = Integer.parseInt(args[2]);
         double minP = Double.parseDouble(args[3]);
-        String out = "ptk_huim_dfs_output.txt";
+        String out = "ptk_huim_bfs_output.txt";
         boolean par = true, dbg = false;
 
         for (int i = 4; i < args.length; i++) {
@@ -520,7 +552,7 @@ public class PTK_HUIM_DFS {
             }
         }
 
-        PTK_HUIM_DFS algo = new PTK_HUIM_DFS(db, prof, out, k, minP, par, dbg);
+        PTK_HUIM_BFS algo = new PTK_HUIM_BFS(db, prof, out, k, minP, par, dbg);
         MiningResult result = algo.run();
         algo.writeResults(result);
         algo.printStats(result);
@@ -814,7 +846,7 @@ public class PTK_HUIM_DFS {
     // =========================================================================
 
     private void mineParallel() {
-        pool.invoke(new DFSMiningTask(0, sortedItems.size()));
+        pool.invoke(new BFSMiningTask(0, sortedItems.size()));
     }
 
     private void mineSequential() {
@@ -844,58 +876,89 @@ public class PTK_HUIM_DFS {
     }
 
     // =========================================================================
-    // DFS Engine: Recursive Prefix-Growth with Three-Tier Pruning
+    // BFS Engine: FIFO Queue Prefix-Growth with Three-Tier Pruning
     // =========================================================================
 
     /**
-     * Recursively explores all extensions of prefix in PTWU-ascending order.
+     * Explores all extensions of prefix using Breadth-First Search (FIFO queue).
      *
-     * Three-tier pruning (reordered for deferred EP optimization):
+     * <p>Instead of recursively descending depth-first, BFS maintains a FIFO queue
+     * (ArrayDeque). Because each extension adds exactly one item, processing nodes
+     * in FIFO order naturally explores all k-itemsets before any (k+1)-itemset
+     * — i.e., level-order traversal of the search tree.</p>
+     *
+     * <p>Stale-node pruning at dequeue: when a node is dequeued, the threshold may
+     * have risen since the node was enqueued (due to better patterns found at the
+     * same or earlier levels). Nodes whose PTWU or PUB now fall below the threshold
+     * are discarded immediately, avoiding unnecessary join operations.</p>
+     *
+     * Three-tier pruning (same correctness as DFS, reordered for deferred EP):
      *   1. PTWU - monotone upper bound (PTWU >= EU for all supersets), O(1)
      *   2. PUB  - tighter upper bound (PUB >= EU, closer to actual EU), O(1)
      *   3. EP   - anti-monotone, deferred: computed ONLY after PTWU+PUB pass, O(count)
      *
-     * By deferring EP computation, Math.log1p() calls are avoided entirely
-     * for joins that fail the cheaper PTWU or PUB checks.
+     * <p><b>Correctness guarantee:</b> EXACT — all non-pruned nodes are eventually
+     * expanded. BFS and DFS explore the same search space; only traversal order
+     * differs. Both produce identical Top-K results.</p>
      *
-     * Threshold refreshed after each successful collection and after each
-     * recursive subtree returns, enabling progressively more aggressive pruning.
+     * <p><b>Memory:</b> O(frontier size) — may hold many nodes for dense search spaces,
+     * compared to O(max depth) for DFS. BFS frontier is typically wider than BestFS
+     * because nodes are not prioritized, so fewer stale nodes get pruned early.</p>
      */
     private void exploreExtensions(UPUList prefix, int startIndex) {
-        double threshold = collector.getThreshold();
-        if (prefix.ptwu < threshold - EPSILON) return;
-        if (prefix.positiveUpperBound < threshold - EPSILON) return;
+        // FIFO queue: level-by-level (BFS) order
+        ArrayDeque<SearchNode> queue = new ArrayDeque<>();
+        queue.offer(new SearchNode(prefix, startIndex));
 
         int itemCount = sortedItems.size();
-        for (int i = startIndex; i < itemCount; i++) {
-            int extItem = sortedItems.get(i);
-            UPUList extList = singleItemLists.get(extItem);
-            if (extList == null) continue;
-            threshold = collector.getThreshold();
 
-            UPUList joined = joinTwoPointer(prefix, extList, extItem, threshold);
-            if (joined == null || joined.entryCount == 0) continue;
+        while (!queue.isEmpty()) {
+            SearchNode node = queue.poll();
+            UPUList current = node.list;
 
-            // Tier 1: PTWU pruning (monotone UB) — O(1), pre-computed in join
-            if (joined.ptwu < threshold - EPSILON) continue;
-            // Tier 2: PUB pruning (tighter UB) — O(1), pre-computed in join
-            if (joined.positiveUpperBound < threshold - EPSILON) continue;
+            // Re-check threshold at dequeue time — prune stale nodes immediately.
+            // The threshold may have risen since this node was enqueued because
+            // other nodes at the same level were processed first and found patterns.
+            double threshold = collector.getThreshold();
+            if (current.ptwu < threshold - EPSILON) continue;
+            if (current.positiveUpperBound < threshold - EPSILON) continue;
 
-            // Tier 3: EP pruning (anti-monotone) — deferred, O(count)
-            // Only computed here because PTWU and PUB already passed.
-            double ep = computeEPFromProbs(joined.probabilities, joined.entryCount);
-            if (ep < minProbability - EPSILON) continue;
-            joined.existentialProbability = ep;
+            for (int i = node.startIndex; i < itemCount; i++) {
+                int extItem = sortedItems.get(i);
+                UPUList extList = singleItemLists.get(extItem);
+                if (extList == null) continue;
 
-            // Admission: only collect patterns with EU >= threshold.
-            // Threshold starts at 0 — effectively EU >= 0 until heap fills.
-            if (joined.expectedUtility >= threshold - EPSILON) {
-                collector.tryCollect(joined);
+                // Refresh threshold within the extension loop — enables progressive
+                // pruning as earlier extensions at the same level yield patterns
                 threshold = collector.getThreshold();
-            }
 
-            exploreExtensions(joined, i + 1);
-            //threshold = collector.getThreshold();
+                UPUList joined = joinTwoPointer(current, extList, extItem, threshold);
+                if (joined == null || joined.entryCount == 0) continue;
+
+                // Tier 1: PTWU pruning (monotone UB) — O(1), pre-computed in join
+                if (joined.ptwu < threshold - EPSILON) continue;
+                // Tier 2: PUB pruning (tighter UB) — O(1), pre-computed in join
+                if (joined.positiveUpperBound < threshold - EPSILON) continue;
+
+                // Tier 3: EP pruning (anti-monotone) — deferred, O(count)
+                // Only computed here because PTWU and PUB already passed.
+                double ep = computeEPFromProbs(joined.probabilities, joined.entryCount);
+                if (ep < minProbability - EPSILON) continue;
+                joined.existentialProbability = ep;
+
+                // Admission: only collect patterns with EU >= threshold.
+                // Threshold starts at 0 — effectively EU >= 0 until heap fills.
+                if (joined.expectedUtility >= threshold - EPSILON) {
+                    collector.tryCollect(joined);
+                    threshold = collector.getThreshold();
+                }
+
+                // Enqueue for future expansion — FIFO order ensures all patterns
+                // at depth d are processed before any pattern at depth d+1
+                if (i + 1 < itemCount) {
+                    queue.offer(new SearchNode(joined, i + 1));
+                }
+            }
         }
     }
 
@@ -1005,7 +1068,7 @@ public class PTK_HUIM_DFS {
     private void writeResults(MiningResult result) throws IOException {
         StringBuilder sb = new StringBuilder();
         sb.append("=================================================\n");
-        sb.append(String.format("PTK-HUIM-DFS Results: Top-%d Patterns%n", result.patterns.size()));
+        sb.append(String.format("PTK-HUIM-BFS Results: Top-%d Patterns%n", result.patterns.size()));
         sb.append(String.format("Parameters: k=%d, minProb=%.4f, parallel=%s%n", k, minProbability, parallel));
         sb.append("=================================================\n");
         sb.append(String.format(Locale.US, "%-6s %-40s %-15s %-15s%n", "Rank", "Pattern", "Expected Util", "Exist Prob"));
@@ -1028,7 +1091,7 @@ public class PTK_HUIM_DFS {
     }
 
     private void printStats(MiningResult result) {
-        System.err.println("============= PTK-HUIM-DFS STATS ==============");
+        System.err.println("============= PTK-HUIM-BFS STATS ==============");
         System.err.printf(" Total time:     %d ms%n", result.executionTimeMs);
         System.err.printf("   Phase 1:      %d ms (preprocessing)%n", result.phase1Ms);
         System.err.printf("   Phase 2:      %d ms (initialization)%n", result.phase2Ms);
