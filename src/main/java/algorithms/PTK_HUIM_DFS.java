@@ -15,19 +15,18 @@ import java.util.concurrent.locks.ReentrantLock;
  * <h3>Algorithm Configuration</h3>
  * <ul>
  *   <li><b>Search strategy:</b>  Depth-First Search (DFS) prefix-growth</li>
- *   <li><b>Join strategy:</b>    Two-pointer merge with inline EU/PUB aggregation
- *       and deferred EP computation (zero transcendental calls in join loop)</li>
+ *   <li><b>Join strategy:</b>    Two-pointer merge with inline EU/PUB aggregation</li>
  *   <li><b>Top-K collector:</b>  Baseline (TreeSet min-heap + HashMap dedup)</li>
  *   <li><b>Parallelism:</b>      ForkJoin work-stealing (Phase 1a, 1d, 3)</li>
  * </ul>
  *
  * <h3>Three-Phase Pipeline</h3>
  * <ol>
- *   <li><b>Phase 1 - Preprocessing:</b> Compute PTWU/EP, filter items, rank by PTWU,
+ *   <li><b>Phase 1 - Preprocessing:</b> Compute PTWU, filter items, rank by PTWU,
  *       build single-item UPU-Lists</li>
  *   <li><b>Phase 2 - Initialization:</b> Evaluate 1-itemsets, seed the Top-K collector</li>
- *   <li><b>Phase 3 - Mining:</b> Recursive DFS prefix-growth with three-tier pruning:
- *       PTWU (monotone UB), PUB (tighter UB), EP (anti-monotone, deferred)</li>
+ *   <li><b>Phase 3 - Mining:</b> Recursive DFS prefix-growth with two-tier pruning:
+ *       PTWU (monotone UB), PUB (tighter UB)</li>
  * </ol>
  *
  * <h3>Input Format</h3>
@@ -49,9 +48,6 @@ public class PTK_HUIM_DFS {
 
     /** Log-space floor to prevent denormalized underflow. */
     private static final double LOG_ZERO = -700.0;
-
-    /** Pre-computed log(1 - epsilon) for EP accumulation fast-path. */
-    private static final double LOG_ONE_MINUS_EPS = Math.log(1.0 - EPSILON);
 
     /** Max transactions per ForkJoin leaf task (Phase 1a, 1d). */
     private static final int LEAF_SIZE = 256;
@@ -146,14 +142,12 @@ public class PTK_HUIM_DFS {
      * UPU-List: transactional projection of one itemset onto the database.
      *
      * Arrays are TID-sorted for O(n) two-pointer join. Pre-aggregated statistics
-     * (EU, EP, PTWU, PUB) are computed during construction or deferred.
+     * (EU, PTWU, PUB) are computed during construction.
      *
      * <p>Probabilities are stored directly (not in log-space) to enable O(1)
-     * multiplication during joins instead of expensive Math.exp() calls.
-     * EP computation is deferred until after PTWU/PUB pruning passes,
-     * avoiding costly Math.log1p() calls for joins that will be pruned.</p>
+     * multiplication during joins instead of expensive Math.exp() calls.</p>
      *
-     * Immutable after EP resolution - safe for concurrent reads in Phase 3.
+     * Immutable after construction - safe for concurrent reads in Phase 3.
      */
     private static final class UPUList {
         final Set<Integer> itemset;
@@ -164,12 +158,10 @@ public class PTK_HUIM_DFS {
         final int entryCount;
         final double ptwu;
         final double expectedUtility;
-        /** EP: set at construction for 1-itemsets, deferred for joined lists. */
-        double existentialProbability;
         final double positiveUpperBound;
 
         UPUList(Set<Integer> itemset, int[] tids, double[] utils, double[] remaining,
-                double[] probs, int count, double ptwu, double eu, double ep, double pub) {
+                double[] probs, int count, double ptwu, double eu, double pub) {
             this.itemset = itemset;
             this.transactionIds = tids;
             this.utilities = utils;
@@ -178,14 +170,13 @@ public class PTK_HUIM_DFS {
             this.entryCount = count;
             this.ptwu = ptwu;
             this.expectedUtility = eu;
-            this.existentialProbability = ep;
             this.positiveUpperBound = pub;
         }
 
         @Override
         public String toString() {
-            return String.format("UPUList{items=%s, entries=%d, EU=%.4f, EP=%.6f}",
-                    itemset, entryCount, expectedUtility, existentialProbability);
+            return String.format("UPUList{items=%s, entries=%d, EU=%.4f}",
+                    itemset, entryCount, expectedUtility);
         }
     }
 
@@ -197,16 +188,14 @@ public class PTK_HUIM_DFS {
      * Discovered high-utility pattern.
      * Ordered by EU ascending (min-heap). Equality by itemset identity only.
      */
-    static final class Pattern implements Comparable<Pattern> {
-        final Set<Integer> items;
+    public static final class Pattern implements Comparable<Pattern> {
+        public final Set<Integer> items;
         final double expectedUtility;
-        final double existentialProbability;
         private final List<Integer> sortedItems;
 
-        Pattern(Set<Integer> items, double eu, double ep) {
+        Pattern(Set<Integer> items, double eu) {
             this.items = items;
             this.expectedUtility = eu;
-            this.existentialProbability = ep;
             this.sortedItems = new ArrayList<>(items);
             Collections.sort(this.sortedItems);
         }
@@ -236,18 +225,17 @@ public class PTK_HUIM_DFS {
 
         @Override
         public String toString() {
-            return String.format("Pattern{items=%s, EU=%.4f, EP=%.6f}",
-                    sortedItems, expectedUtility, existentialProbability);
+            return String.format("Pattern{items=%s, EU=%.4f}", sortedItems, expectedUtility);
         }
     }
 
     /**
      * Encapsulates the complete mining result for clean return from run().
      */
-    static final class MiningResult {
-        final List<Pattern> patterns;
+    public static final class MiningResult {
+        public final List<Pattern> patterns;
         final long executionTimeMs;
-        final double memoryUsedMB;
+        public final double memoryUsedMB;
         final int validItemCount;
         final int upuListCount;
         final int databaseSize;
@@ -301,7 +289,7 @@ public class PTK_HUIM_DFS {
                 if (existing != null) {
                     if (eu > existing.expectedUtility + EPSILON) {
                         heap.remove(existing);
-                        Pattern updated = new Pattern(itemset, eu, candidate.existentialProbability);
+                        Pattern updated = new Pattern(itemset, eu);
                         heap.add(updated);
                         index.put(itemset, updated);
                         updateThreshold();
@@ -310,7 +298,7 @@ public class PTK_HUIM_DFS {
                     return false;
                 }
 
-                Pattern newPattern = new Pattern(itemset, eu, candidate.existentialProbability);
+                Pattern newPattern = new Pattern(itemset, eu);
                 heap.add(newPattern);
                 index.put(itemset, newPattern);
 
@@ -349,27 +337,26 @@ public class PTK_HUIM_DFS {
     // Inner Classes - ForkJoin Tasks
     // =========================================================================
 
-    /** Phase 1a: parallel PTWU + EP computation via ForkJoin. */
-    private final class Phase1Task extends RecursiveTask<double[][]> {
+    /** Phase 1a: parallel PTWU computation via ForkJoin. */
+    private final class Phase1Task extends RecursiveTask<double[]> {
         final int from, to;
         Phase1Task(int from, int to) { this.from = from; this.to = to; }
 
         @Override
-        protected double[][] compute() {
+        protected double[] compute() {
             if (to - from <= LEAF_SIZE) {
                 double[] ptwu = new double[denseSize];
-                double[] lc = new double[denseSize];
                 for (int i = from; i < to; i++)
-                    processTransactionPhase1(database.get(i), ptwu, lc);
-                return new double[][] { ptwu, lc };
+                    processTransactionPhase1(database.get(i), ptwu);
+                return ptwu;
             }
             int mid = (from + to) >>> 1;
             Phase1Task left = new Phase1Task(from, mid);
             Phase1Task right = new Phase1Task(mid, to);
             left.fork();
-            double[][] r = right.compute();
-            double[][] l = left.join();
-            for (int i = 0; i < denseSize; i++) { l[0][i] += r[0][i]; l[1][i] += r[1][i]; }
+            double[] r = right.compute();
+            double[] l = left.join();
+            for (int i = 0; i < denseSize; i++) l[i] += r[i];
             return l;
         }
     }
@@ -440,7 +427,6 @@ public class PTK_HUIM_DFS {
     private final String profitFile;
     private final String outputFile;
     private final int k;
-    private final double minProbability;
     private final boolean parallel;
     private final boolean debug;
 
@@ -461,7 +447,6 @@ public class PTK_HUIM_DFS {
     // =========================================================================
 
     private double[] densePTWU;
-    private double[] denseLogComp;
     private Set<Integer> validItems;
     private List<Integer> sortedItems;
     private int[] rankByItemId;
@@ -482,12 +467,11 @@ public class PTK_HUIM_DFS {
     // =========================================================================
 
     public PTK_HUIM_DFS(String databaseFile, String profitFile, String outputFile,
-                         int k, double minProbability, boolean parallel, boolean debug) {
+                         int k, boolean parallel, boolean debug) {
         this.databaseFile = databaseFile;
         this.profitFile = profitFile;
         this.outputFile = outputFile;
         this.k = k;
-        this.minProbability = minProbability;
         this.parallel = parallel;
         this.debug = debug;
     }
@@ -497,22 +481,21 @@ public class PTK_HUIM_DFS {
     // =========================================================================
 
     public static void main(String[] args) throws Exception {
-        if (args.length < 4) {
-            System.err.println("Usage: java PTK_HUIM_DFS <database> <profits> <k> <minProb> " +
+        if (args.length < 3) {
+            System.err.println("Usage: java PTK_HUIM_DFS <database> <profits> <k> " +
                     "[output] [--no-parallel] [--debug]");
             System.err.println();
             System.err.println("Example:");
-            System.err.println("  java PTK_HUIM_DFS data/chess_db.txt data/chess_profits.txt 100 0.1 --debug");
+            System.err.println("  java PTK_HUIM_DFS data/chess_db.txt data/chess_profits.txt 100 --debug");
             System.exit(1);
         }
 
         String db = args[0], prof = args[1];
         int k = Integer.parseInt(args[2]);
-        double minP = Double.parseDouble(args[3]);
         String out = "ptk_huim_dfs_output.txt";
         boolean par = true, dbg = false;
 
-        for (int i = 4; i < args.length; i++) {
+        for (int i = 3; i < args.length; i++) {
             switch (args[i]) {
                 case "--no-parallel": par = false; break;
                 case "--debug":      dbg = true;  break;
@@ -520,7 +503,7 @@ public class PTK_HUIM_DFS {
             }
         }
 
-        PTK_HUIM_DFS algo = new PTK_HUIM_DFS(db, prof, out, k, minP, par, dbg);
+        PTK_HUIM_DFS algo = new PTK_HUIM_DFS(db, prof, out, k, par, dbg);
         MiningResult result = algo.run();
         algo.writeResults(result);
         algo.printStats(result);
@@ -542,7 +525,7 @@ public class PTK_HUIM_DFS {
 
             // Phase 1: Preprocessing
             long p1 = System.currentTimeMillis();
-            computePTWU_EP();
+            computePTWU();
             filterAndRankItems();
             buildUPULists();
             phase1Ms = System.currentTimeMillis() - p1;
@@ -644,23 +627,20 @@ public class PTK_HUIM_DFS {
     }
 
     // =========================================================================
-    // Phase 1a: Compute PTWU and EP
+    // Phase 1a: Compute PTWU
     // =========================================================================
 
-    private void computePTWU_EP() {
+    private void computePTWU() {
         densePTWU = new double[denseSize];
-        denseLogComp = new double[denseSize];
         if (parallel && database.size() > LEAF_SIZE) {
-            double[][] result = pool.invoke(new Phase1Task(0, database.size()));
-            densePTWU = result[0];
-            denseLogComp = result[1];
+            densePTWU = pool.invoke(new Phase1Task(0, database.size()));
         } else {
             for (Transaction tx : database)
-                processTransactionPhase1(tx, densePTWU, denseLogComp);
+                processTransactionPhase1(tx, densePTWU);
         }
     }
 
-    private void processTransactionPhase1(Transaction tx, double[] ptwu, double[] logComp) {
+    private void processTransactionPhase1(Transaction tx, double[] ptwu) {
         double ptu = 0.0;
         for (int item : tx.getItems()) {
             if (item < 0 || item > maxItemId) continue;
@@ -673,12 +653,11 @@ public class PTK_HUIM_DFS {
             int di = itemIdToDense[item];
             if (di < 0) continue;
             ptwu[di] += ptu;
-            logComp[di] += logComplement(tx.getProbability(item));
         }
     }
 
     // =========================================================================
-    // Phase 1b + 1c: Filter by EP, Rank by PTWU
+    // Phase 1b + 1c: Filter Items, Rank by PTWU
     // =========================================================================
 
     private void filterAndRankItems() {
@@ -687,8 +666,7 @@ public class PTK_HUIM_DFS {
             if (itemId < 0 || itemId > maxItemId) continue;
             int di = itemIdToDense[itemId];
             if (di < 0) continue;
-            double ep = computeEP(denseLogComp[di]);
-            if (ep >= minProbability - EPSILON && densePTWU[di] > 0.0) validItems.add(itemId);
+            if (densePTWU[di] > 0.0) validItems.add(itemId);
         }
 
         Integer[] candidates = validItems.toArray(new Integer[0]);
@@ -718,8 +696,7 @@ public class PTK_HUIM_DFS {
             if (entries == null || entries.isEmpty()) continue;
             double ptwu = densePTWU[itemIdToDense[item]];
             UPUList list = buildUPUListFromEntries(Collections.singleton(item), entries, ptwu);
-            if (list.existentialProbability >= minProbability - EPSILON)
-                singleItemLists.put(item, list);
+            singleItemLists.put(item, list);
         }
     }
 
@@ -771,7 +748,7 @@ public class PTK_HUIM_DFS {
         int n = entries.size();
         int[] tids = new int[n]; double[] utils = new double[n];
         double[] rem = new double[n]; double[] probs = new double[n];
-        double sumEU = 0, posUB = 0, logComp = 0;
+        double sumEU = 0, posUB = 0;
 
         for (int i = 0; i < n; i++) {
             TransactionEntry e = entries.get(i);
@@ -783,16 +760,8 @@ public class PTK_HUIM_DFS {
             sumEU += e.utility * prob;
             double total = e.utility + e.remainingUtility;
             if (total > 0) posUB += prob * total;
-
-            if (e.logProbability > LOG_ONE_MINUS_EPS) { logComp = LOG_ZERO; }
-            else if (logComp >= LOG_ZERO) {
-                double l1p = (prob < 0.5) ? Math.log1p(-prob) : Math.log(1.0 - prob);
-                logComp += l1p;
-                if (logComp < LOG_ZERO) logComp = LOG_ZERO;
-            }
         }
-        double ep = (logComp <= LOG_ZERO) ? 1.0 : 1.0 - Math.exp(logComp);
-        return new UPUList(itemset, tids, utils, rem, probs, n, ptwu, sumEU, ep, posUB);
+        return new UPUList(itemset, tids, utils, rem, probs, n, ptwu, sumEU, posUB);
     }
 
     // =========================================================================
@@ -803,8 +772,7 @@ public class PTK_HUIM_DFS {
         for (int item : sortedItems) {
             UPUList list = singleItemLists.get(item);
             if (list == null) continue;
-            if (list.existentialProbability >= minProbability - EPSILON
-                    && list.expectedUtility >= collector.getThreshold() - EPSILON)
+            if (list.expectedUtility >= collector.getThreshold() - EPSILON)
                 collector.tryCollect(list);
         }
     }
@@ -844,19 +812,15 @@ public class PTK_HUIM_DFS {
     }
 
     // =========================================================================
-    // DFS Engine: Recursive Prefix-Growth with Three-Tier Pruning
+    // DFS Engine: Recursive Prefix-Growth with Two-Tier Pruning
     // =========================================================================
 
     /**
      * Recursively explores all extensions of prefix in PTWU-ascending order.
      *
-     * Three-tier pruning (reordered for deferred EP optimization):
+     * Two-tier pruning:
      *   1. PTWU - monotone upper bound (PTWU >= EU for all supersets), O(1)
      *   2. PUB  - tighter upper bound (PUB >= EU, closer to actual EU), O(1)
-     *   3. EP   - anti-monotone, deferred: computed ONLY after PTWU+PUB pass, O(count)
-     *
-     * By deferring EP computation, Math.log1p() calls are avoided entirely
-     * for joins that fail the cheaper PTWU or PUB checks.
      *
      * Threshold refreshed after each successful collection and after each
      * recursive subtree returns, enabling progressively more aggressive pruning.
@@ -881,12 +845,6 @@ public class PTK_HUIM_DFS {
             // Tier 2: PUB pruning (tighter UB) — O(1), pre-computed in join
             if (joined.positiveUpperBound < threshold - EPSILON) continue;
 
-            // Tier 3: EP pruning (anti-monotone) — deferred, O(count)
-            // Only computed here because PTWU and PUB already passed.
-            double ep = computeEPFromProbs(joined.probabilities, joined.entryCount);
-            if (ep < minProbability - EPSILON) continue;
-            joined.existentialProbability = ep;
-
             // Admission: only collect patterns with EU >= threshold.
             // Threshold starts at 0 — effectively EU >= 0 until heap fills.
             if (joined.expectedUtility >= threshold - EPSILON) {
@@ -895,12 +853,11 @@ public class PTK_HUIM_DFS {
             }
 
             exploreExtensions(joined, i + 1);
-            //threshold = collector.getThreshold();
         }
     }
 
     // =========================================================================
-    // Two-Pointer UPU-List Join with Inline EU/PUB Aggregation (EP Deferred)
+    // Two-Pointer UPU-List Join with Inline EU/PUB Aggregation
     // =========================================================================
 
     /**
@@ -908,10 +865,7 @@ public class PTK_HUIM_DFS {
      * O(|L1| + |L2|) two-pointer merge computing EU and PUB inline.
      *
      * <p><b>Optimization:</b> Probabilities are multiplied directly (prob1 × prob2)
-     * instead of computing exp(logP1 + logP2), eliminating all Math.exp() calls.
-     * EP computation is deferred — not computed here. The returned UPUList has
-     * EP = -1.0 (sentinel). Caller must invoke {@link #computeEPFromProbs}
-     * after PTWU/PUB pruning passes.</p>
+     * instead of computing exp(logP1 + logP2), eliminating all Math.exp() calls.</p>
      */
     private static UPUList joinTwoPointer(UPUList list1, UPUList list2,
                                            int extensionItem, double threshold) {
@@ -950,44 +904,13 @@ public class PTK_HUIM_DFS {
         Set<Integer> itemset = new HashSet<>((sz * 4) / 3 + 1);
         itemset.addAll(list1.itemset);
         itemset.add(extensionItem);
-        // EP = -1.0 sentinel: deferred until after PTWU/PUB pruning
         return new UPUList(itemset, tids, utils, rems, probs, count,
-                joinedPTWU, sumEU, -1.0, posUB);
+                joinedPTWU, sumEU, posUB);
     }
 
     // =========================================================================
     // Utility Methods
     // =========================================================================
-
-    /**
-     * Computes Existential Probability from pre-stored probability values.
-     * Used for deferred EP computation after PTWU/PUB pruning passes.
-     *
-     * <p>EP = 1 - Π(1 - prob_i), computed in log-space for numerical stability:
-     * logComp = Σ log(1 - prob_i), then EP = 1 - exp(logComp).</p>
-     */
-    private static double computeEPFromProbs(double[] probs, int count) {
-        double logComp = 0;
-        for (int i = 0; i < count; i++) {
-            double prob = probs[i];
-            if (prob >= 1.0 - EPSILON) return 1.0;
-            if (logComp <= LOG_ZERO) break;
-            double l1p = (prob < 0.5) ? Math.log1p(-prob) : Math.log(1.0 - prob);
-            logComp += l1p;
-            if (logComp < LOG_ZERO) logComp = LOG_ZERO;
-        }
-        return (logComp <= LOG_ZERO) ? 1.0 : 1.0 - Math.exp(logComp);
-    }
-
-    private static double logComplement(double probability) {
-        if (probability <= 0) return 0.0;
-        if (probability >= 1.0) return LOG_ZERO;
-        return (probability < 0.5) ? Math.log1p(-probability) : Math.log(1.0 - probability);
-    }
-
-    private static double computeEP(double logComp) {
-        return (logComp <= LOG_ZERO) ? 1.0 : 1.0 - Math.exp(logComp);
-    }
 
     private void debugLog(String format, Object... args) {
         if (debug) System.err.printf(format + "%n", args);
@@ -1006,15 +929,15 @@ public class PTK_HUIM_DFS {
         StringBuilder sb = new StringBuilder();
         sb.append("=================================================\n");
         sb.append(String.format("PTK-HUIM-DFS Results: Top-%d Patterns%n", result.patterns.size()));
-        sb.append(String.format("Parameters: k=%d, minProb=%.4f, parallel=%s%n", k, minProbability, parallel));
+        sb.append(String.format("Parameters: k=%d, parallel=%s%n", k, parallel));
         sb.append("=================================================\n");
-        sb.append(String.format(Locale.US, "%-6s %-40s %-15s %-15s%n", "Rank", "Pattern", "Expected Util", "Exist Prob"));
+        sb.append(String.format(Locale.US, "%-6s %-40s %-15s%n", "Rank", "Pattern", "Expected Util"));
         sb.append("-------------------------------------------------\n");
 
         int rank = 1;
         for (Pattern p : result.patterns) {
-            sb.append(String.format(Locale.US, "%-6d %-40s %-15.4f %-15.6f%n",
-                    rank++, p.sortedItems.toString(), p.expectedUtility, p.existentialProbability));
+            sb.append(String.format(Locale.US, "%-6d %-40s %-15.4f%n",
+                    rank++, p.sortedItems.toString(), p.expectedUtility));
         }
 
         sb.append("=================================================\n");

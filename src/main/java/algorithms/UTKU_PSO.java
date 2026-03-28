@@ -13,10 +13,9 @@ import java.util.*;
  * Key changes from TKU-PSO:
  *   1. Fitness = Expected Utility: EU(X) = Σ_T P(X,T) × u(X,T)
  *   2. Pruning uses PTWU (only positive-profit items in transaction weight)
- *   3. Existential Probability (EP) filtering: EP(X) ≥ minProb required
- *   4. MSF initialized to -∞ (EU can be negative with negative profits)
- *   5. Fitness estimation adapted for probability-weighted contributions
- *   6. Bit-clear uses PTWU < MSF OR EP < minProb
+ *   3. MSF initialized to 0 (only EU >= 0 patterns accepted initially)
+ *   4. Fitness estimation adapted for probability-weighted contributions
+ *   5. Bit-clear uses PTWU < MSF
  *
  * Input format:
  *   Database file: one transaction per line
@@ -61,7 +60,6 @@ public class UTKU_PSO {
         BitSet TIDS;              // TID-set: transactions containing this item
         double ptwu;              // PTWU (Positive Transaction-Weighted Utility)
         double totalEU = 0.0;     // EU of 1-itemset: Σ_T P(i,T) × u(i,T)
-        double ep = 0.0;          // EP of 1-itemset: 1 - Π_T (1 - P(i,T))
         double avgEU;             // average expected contribution per transaction
         double maxEU = 0.0;       // maximum |P(i,T) × u(i,T)| across transactions
 
@@ -90,19 +88,16 @@ public class UTKU_PSO {
     private static class Particle implements Comparable<Particle> {
         BitSet X;                 // encoding vector (itemset)
         double fitness;           // EU of the itemset
-        double ep;                // EP of the itemset
         double estFitness;        // estimated fitness (per-item sum, before × support)
 
         Particle(int size) {
             this.X = new BitSet(size);
             this.fitness = Double.NEGATIVE_INFINITY;
-            this.ep = 0.0;
         }
 
-        Particle(BitSet bitset, double fitness, double ep) {
+        Particle(BitSet bitset, double fitness) {
             this.X = (BitSet) bitset.clone();
             this.fitness = fitness;
-            this.ep = ep;
         }
 
         @Override
@@ -163,21 +158,6 @@ public class UTKU_PSO {
         int getSize() { return sol.size(); }
     }
 
-    /**
-     * Result of simultaneous EU + EP computation.
-     */
-    private static class EvalResult {
-        final double eu;
-        final double ep;
-        final boolean valid; // ep ≥ minProb
-
-        EvalResult(double eu, double ep, boolean valid) {
-            this.eu = eu;
-            this.ep = ep;
-            this.valid = valid;
-        }
-    }
-
     // =========================================================================
     // Fields
     // =========================================================================
@@ -190,7 +170,7 @@ public class UTKU_PSO {
     private Particle gBest;
     private Particle[] pBest;
     private Particle[] population;
-    private ArrayList<Item> validItems = new ArrayList<>(); // valid items (PTWU ≥ CEU, EP ≥ minProb)
+    private ArrayList<Item> validItems = new ArrayList<>(); // valid items (PTWU ≥ CEU)
     private HashSet<BitSet> explored;
     private HashMap<Integer, Integer> itemNamesRev = new HashMap<>(); // renamed → original
 
@@ -216,7 +196,6 @@ public class UTKU_PSO {
     private int pop_size = 20;
     private int iterations = 10000;
     private int k = 100;
-    private double minProb = 0.1;
 
     // Stats
     private double maxMemory;
@@ -228,12 +207,11 @@ public class UTKU_PSO {
     // =========================================================================
 
     public UTKU_PSO(String databaseFile, String profitFile, String outputFile,
-                    int k, double minProb, int pop_size, int iterations) {
+                    int k, int pop_size, int iterations) {
         this.databaseFile = databaseFile;
         this.profitFile = profitFile;
         this.outputFile = outputFile;
         this.k = k;
-        this.minProb = minProb;
         this.pop_size = pop_size;
         this.iterations = iterations;
     }
@@ -243,22 +221,21 @@ public class UTKU_PSO {
     // =========================================================================
 
     public static void main(String[] args) throws IOException {
-        if (args.length < 4) {
-            System.err.println("Usage: java UTKU_PSO <database> <profits> <k> <minProb> " +
+        if (args.length < 3) {
+            System.err.println("Usage: java UTKU_PSO <database> <profits> <k> " +
                     "[pop_size] [iterations] [output]");
-            System.err.println("Example: java UTKU_PSO data/chess_database.txt data/chess_profits.txt 100 0.1");
+            System.err.println("Example: java UTKU_PSO data/chess_database.txt data/chess_profits.txt 100");
             System.exit(1);
         }
 
         String dbFile = args[0];
         String profitFile = args[1];
         int k = Integer.parseInt(args[2]);
-        double minProb = Double.parseDouble(args[3]);
-        int popSize = (args.length > 4) ? Integer.parseInt(args[4]) : 20;
-        int iters = (args.length > 5) ? Integer.parseInt(args[5]) : 10000;
-        String outFile = (args.length > 6) ? args[6] : "utku_pso_output.txt";
+        int popSize = (args.length > 3) ? Integer.parseInt(args[3]) : 20;
+        int iters = (args.length > 4) ? Integer.parseInt(args[4]) : 10000;
+        String outFile = (args.length > 5) ? args[5] : "utku_pso_output.txt";
 
-        UTKU_PSO algorithm = new UTKU_PSO(dbFile, profitFile, outFile, k, minProb, popSize, iters);
+        UTKU_PSO algorithm = new UTKU_PSO(dbFile, profitFile, outFile, k, popSize, iters);
         algorithm.run();
         algorithm.printStats();
     }
@@ -280,7 +257,7 @@ public class UTKU_PSO {
         solutions = new Solutions(k);
         checkMemory();
 
-        System.out.println("Valid items (PTWU+EP filtered): " + validItems.size());
+        System.out.println("Valid items (PTWU filtered): " + validItems.size());
 
         // Precompute item statistics for estimation
         sizeOneItemsets = new TreeSet<>();
@@ -363,25 +340,19 @@ public class UTKU_PSO {
     }
 
     /**
-     * Reads the uncertain database, computes PTWU/EU/EP for each item,
+     * Reads the uncertain database, computes PTWU/EU for each item,
      * prunes items, and builds the internal database representation.
      *
      * Two database scans:
-     *   Scan 1: Compute PTWU, EU, EP for each 1-itemset
+     *   Scan 1: Compute PTWU, EU for each 1-itemset
      *   Scan 2: Prune items and build database matrix
      */
     private void init() throws IOException {
         // =====================================================================
-        // Scan 1: Compute PTWU, EU, EP of each item
+        // Scan 1: Compute PTWU, EU of each item
         // =====================================================================
-        // For each item, accumulate:
-        //   PTWU(i) = Σ_{T: i∈T} PTU(T)  where PTU(T) = Σ_{j∈T, profit(j)>0} profit(j)×qty(j,T)
-        //   EU(i) = Σ_{T: i∈T} P(i,T) × profit(i) × qty(i,T)
-        //   EP(i) via log-complement: logComp(i) = Σ_{T: i∈T} log(1 - P(i,T))
-
         Map<Integer, Double> itemPTWU = new HashMap<>();
         Map<Integer, Double> itemEU = new HashMap<>();
-        Map<Integer, Double> itemLogComp = new HashMap<>(); // for EP
         Map<Integer, Double> itemMaxEU = new HashMap<>();   // max |P×u| per transaction
 
         try (BufferedReader reader = new BufferedReader(new FileReader(databaseFile))) {
@@ -421,7 +392,7 @@ public class UTKU_PSO {
                     }
                 }
 
-                // Second pass: distribute PTU to PTWU, accumulate EU and EP
+                // Second pass: distribute PTU to PTWU, accumulate EU
                 for (int i = 0; i < parsedItems.size(); i++) {
                     int itemId = parsedItems.get(i)[0];
                     int qty = parsedItems.get(i)[1];
@@ -436,17 +407,6 @@ public class UTKU_PSO {
                     double contribution = prob * utility;
                     itemEU.merge(itemId, contribution, Double::sum);
 
-                    // EP log-complement accumulation
-                    double logC;
-                    if (prob >= 1.0) {
-                        logC = -700.0; // log(0) ≈ -∞, clamped
-                    } else if (prob < 0.5) {
-                        logC = Math.log1p(-prob);
-                    } else {
-                        logC = Math.log(1.0 - prob);
-                    }
-                    itemLogComp.merge(itemId, logC, Double::sum);
-
                     // Max |expected contribution| per transaction
                     double absContrib = Math.abs(contribution);
                     itemMaxEU.merge(itemId, absContrib, Math::max);
@@ -454,24 +414,10 @@ public class UTKU_PSO {
             }
         }
 
-        // Compute EP from log-complement
-        Map<Integer, Double> itemEP = new HashMap<>();
-        for (Map.Entry<Integer, Double> e : itemLogComp.entrySet()) {
-            double lc = e.getValue();
-            double ep = (lc <= -700.0) ? 1.0 : 1.0 - Math.exp(lc);
-            itemEP.put(e.getKey(), ep);
-        }
-
         // =====================================================================
-        // Compute CEU (Critical Expected Utility) = k-th largest EU among EP-valid items
+        // Compute CEU (Critical Expected Utility) = k-th largest EU among items
         // =====================================================================
-        List<Map.Entry<Integer, Double>> euList = new ArrayList<>();
-        for (Map.Entry<Integer, Double> e : itemEU.entrySet()) {
-            double ep = itemEP.getOrDefault(e.getKey(), 0.0);
-            if (ep >= minProb) {
-                euList.add(e);
-            }
-        }
+        List<Map.Entry<Integer, Double>> euList = new ArrayList<>(itemEU.entrySet());
         euList.sort((a, b) -> Double.compare(b.getValue(), a.getValue())); // descending EU
         double ceu = (k <= euList.size()) ? euList.get(k - 1).getValue() : 0.0;
 
@@ -482,7 +428,7 @@ public class UTKU_PSO {
         System.out.println("PTWU pruning threshold: " + minUtilThreshold);
 
         // =====================================================================
-        // Build valid item set: PTWU ≥ threshold AND EP ≥ minProb
+        // Build valid item set: PTWU ≥ threshold
         // =====================================================================
         // Rename items from 1 to #validItems (sorted by EU descending for better init)
         HashMap<Integer, Integer> itemNames = new HashMap<>(); // original → renamed
@@ -491,16 +437,14 @@ public class UTKU_PSO {
         for (Map.Entry<Integer, Double> e : euList) {
             int origItem = e.getKey();
             double ptwu = itemPTWU.getOrDefault(origItem, 0.0);
-            double ep = itemEP.getOrDefault(origItem, 0.0);
 
-            if (ptwu >= minUtilThreshold && ep >= minProb) {
+            if (ptwu >= minUtilThreshold) {
                 itemNames.put(origItem, name);
                 itemNamesRev.put(name, origItem);
 
                 Item item = new Item(name);
                 item.ptwu = ptwu;
                 item.totalEU = itemEU.getOrDefault(origItem, 0.0);
-                item.ep = ep;
                 item.maxEU = itemMaxEU.getOrDefault(origItem, 0.0);
                 validItems.add(item);
                 name++;
@@ -591,23 +535,22 @@ public class UTKU_PSO {
 
             // PEV-check and evaluate
             BitSet tidSet = pevCheck(p);
-            EvalResult result = calcFitness(p, tidSet, -1);
-            p.fitness = result.eu;
-            p.ep = result.ep;
+            double eu = calcFitness(p, tidSet, -1);
+            p.fitness = eu;
 
             population[i] = p;
-            pBest[i] = new Particle(p.X, p.fitness, p.ep);
+            pBest[i] = new Particle(p.X, p.fitness);
 
             if (!explored.contains(p.X)) {
-                if (result.valid && p.fitness > minSolutionFitness) {
-                    solutions.add(new Particle(p.X, p.fitness, p.ep));
+                if (p.fitness > minSolutionFitness) {
+                    solutions.add(new Particle(p.X, p.fitness));
                 }
             }
 
             if (i == 0) {
-                gBest = new Particle(p.X, p.fitness, p.ep);
+                gBest = new Particle(p.X, p.fitness);
             } else if (p.fitness > gBest.fitness) {
-                gBest = new Particle(p.X, p.fitness, p.ep);
+                gBest = new Particle(p.X, p.fitness);
             }
 
             explored.add((BitSet) p.X.clone());
@@ -621,13 +564,11 @@ public class UTKU_PSO {
     private void fillSolutions() {
         while (solutions.getSize() < k && !sizeOneItemsets.isEmpty()) {
             Item item = sizeOneItemsets.pollLast(); // highest EU 1-itemset
-            if (item.ep < minProb) continue; // EP filter
             if (item.totalEU <= 0) break;    // stop: remaining items have EU <= 0
 
             Particle p = new Particle(validItems.size());
             p.X.set(item.item);
             p.fitness = item.totalEU;
-            p.ep = item.ep;
             solutions.add(p);
             explored.add(p.X);
         }
@@ -671,32 +612,31 @@ public class UTKU_PSO {
     }
 
     // =========================================================================
-    // Fitness Evaluation (Simultaneous EU + EP)
+    // Fitness Evaluation (EU computation)
     // =========================================================================
 
     /**
-     * Computes Expected Utility and Existential Probability simultaneously.
+     * Computes Expected Utility of the particle's itemset.
      *
      * EU(X) = Σ_T P(X,T) × u(X,T)
-     * EP(X) = 1 - Π_T (1 - P(X,T))   [computed in log-space]
      *
      * @param p      the particle
      * @param tidSet TID-set of the particle
      * @param idx    population index (-1 for initial population)
-     * @return EvalResult with EU, EP, and validity flag
+     * @return EU value, or Double.NEGATIVE_INFINITY if evaluation was skipped
      */
-    private EvalResult calcFitness(Particle p, BitSet tidSet, int idx) {
+    private double calcFitness(Particle p, BitSet tidSet, int idx) {
         // Special case: 1-itemset — return precomputed values
         if (p.X.cardinality() == 1) {
             int itemIdx = p.X.nextSetBit(0);
             Item item = validItems.get(itemIdx - 1);
-            return new EvalResult(item.totalEU, item.ep, item.ep >= minProb);
+            return item.totalEU;
         }
 
         // Fitness estimation — skip if estimate is unpromising
         int support = tidSet.cardinality();
         if (support == 0) {
-            return new EvalResult(0.0, 0.0, false);
+            return Double.NEGATIVE_INFINITY;
         }
 
         double est = p.estFitness * support;
@@ -704,18 +644,13 @@ public class UTKU_PSO {
 
         if (idx != -1) {
             // Skip evaluation if estimate + buffer < MSF AND estimate < pBest fitness
-            // Note: for negative EU, we compare the estimate (which is an overestimate
-            // of |EU|) against both thresholds
             if (est + buffer < minSolutionFitness && est + buffer < pBest[idx].fitness) {
-                // Return a result indicating this particle was skipped
-                // fitness = NEGATIVE_INFINITY signals "not evaluated"
-                return new EvalResult(Double.NEGATIVE_INFINITY, 0.0, false);
+                return Double.NEGATIVE_INFINITY;
             }
         }
 
-        // Full evaluation: compute EU and EP in a single database scan
+        // Full evaluation: compute EU in a single database scan
         double eu = 0.0;
-        double logComplement = 0.0;
 
         for (int t = tidSet.nextSetBit(0); t != -1; t = tidSet.nextSetBit(t + 1)) {
             TransEntry[] trans = database.get(t);
@@ -740,27 +675,7 @@ public class UTKU_PSO {
 
             // EU accumulation
             eu += prob * transUtil;
-
-            // EP accumulation in log-space
-            if (logProb > Math.log(1.0 - 1e-10)) {
-                // P(X,T) ≈ 1 → complement = 0 → EP = 1
-                logComplement = -700.0;
-            } else if (logComplement > -700.0) {
-                double log1MinusP;
-                if (prob < 0.5) {
-                    log1MinusP = Math.log1p(-prob);
-                } else {
-                    log1MinusP = Math.log(1.0 - prob);
-                }
-                logComplement += log1MinusP;
-                if (logComplement < -700.0) {
-                    logComplement = -700.0;
-                }
-            }
         }
-
-        double ep = (logComplement <= -700.0) ? 1.0 : 1.0 - Math.exp(logComplement);
-        boolean valid = ep >= minProb;
 
         // Update over/underestimate counters (for deviation tuning)
         if (est + buffer < eu) {
@@ -769,7 +684,7 @@ public class UTKU_PSO {
             highEst++;
         }
 
-        return new EvalResult(eu, ep, valid);
+        return eu;
     }
 
     // =========================================================================
@@ -795,8 +710,8 @@ public class UTKU_PSO {
             if (explored.contains(p.X)) {
                 int rand = (int) (validItems.size() * Math.random());
                 Item item = validItems.get(rand);
-                // Clear if item's PTWU < MSF OR item's EP < minProb
-                if (item.ptwu < minSolutionFitness || item.ep < minProb) {
+                // Clear if item's PTWU < MSF
+                if (item.ptwu < minSolutionFitness) {
                     p.X.clear(item.item);
                 } else {
                     p.X.flip(item.item);
@@ -809,25 +724,24 @@ public class UTKU_PSO {
                 BitSet tidSet = pevCheck(p);
 
                 if (!explored.contains(p.X)) {
-                    EvalResult result = calcFitness(p, tidSet, i);
+                    double eu = calcFitness(p, tidSet, i);
 
                     // Only process if evaluation was not skipped
-                    if (result.eu > Double.NEGATIVE_INFINITY) {
-                        p.fitness = result.eu;
-                        p.ep = result.ep;
+                    if (eu > Double.NEGATIVE_INFINITY) {
+                        p.fitness = eu;
 
                         // Update pBest
                         if (p.fitness > pBest[i].fitness) {
-                            Particle pCopy = new Particle(p.X, p.fitness, p.ep);
+                            Particle pCopy = new Particle(p.X, p.fitness);
                             pBest[i] = pCopy;
                             if (p.fitness > gBest.fitness) {
                                 gBest = pCopy;
                             }
                         }
 
-                        // Check if top-k HUI (must pass EP check)
-                        if (result.valid && p.fitness > minSolutionFitness) {
-                            solutions.add(new Particle(p.X, p.fitness, p.ep));
+                        // Check if top-k HUI
+                        if (p.fitness > minSolutionFitness) {
+                            solutions.add(new Particle(p.X, p.fitness));
                         }
                     }
 
@@ -858,7 +772,7 @@ public class UTKU_PSO {
 
     /**
      * Flips a random number of bits from the diff list.
-     * Items with PTWU < MSF or EP < minProb are always cleared (never set).
+     * Items with PTWU < MSF are always cleared (never set).
      */
     private void changeParticle(List<Integer> diffList, Particle p) {
         if (diffList.size() > 0) {
@@ -872,8 +786,8 @@ public class UTKU_PSO {
                 if (itemIdx < 1 || itemIdx > validItems.size()) continue;
 
                 Item item = validItems.get(itemIdx - 1);
-                // CHANGED: clear if PTWU < MSF OR EP < minProb
-                if (item.ptwu < minSolutionFitness || item.ep < minProb) {
+                // Clear if PTWU < MSF
+                if (item.ptwu < minSolutionFitness) {
                     p.X.clear(item.item);
                 } else {
                     p.X.flip(item.item);
@@ -975,10 +889,10 @@ public class UTKU_PSO {
         StringBuilder sb = new StringBuilder();
         sb.append("=================================================\n");
         sb.append(String.format("UTKU-PSO Results: Top-%d Patterns%n", solutions.getSize()));
-        sb.append(String.format("Parameters: k=%d, minProb=%.4f, pop_size=%d, iterations=%d%n",
-                k, minProb, pop_size, iterations));
+        sb.append(String.format("Parameters: k=%d, pop_size=%d, iterations=%d%n",
+                k, pop_size, iterations));
         sb.append("=================================================\n");
-        sb.append(String.format("%-6s %-40s %-15s %-15s%n", "Rank", "Pattern", "Expected Util", "Exist Prob"));
+        sb.append(String.format("%-6s %-40s %-15s%n", "Rank", "Pattern", "Expected Util"));
         sb.append("-------------------------------------------------\n");
 
         int rank = 1;
@@ -992,8 +906,8 @@ public class UTKU_PSO {
             }
             itemset.append("}");
 
-            sb.append(String.format(Locale.US, "%-6d %-40s %-15.4f %-15.6f%n",
-                    rank++, itemset.toString(), p.fitness, p.ep));
+            sb.append(String.format(Locale.US, "%-6d %-40s %-15.4f%n",
+                    rank++, itemset.toString(), p.fitness));
         }
 
         sb.append("=================================================\n");
