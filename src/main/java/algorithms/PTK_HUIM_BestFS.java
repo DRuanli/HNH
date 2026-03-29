@@ -796,6 +796,7 @@ public class PTK_HUIM_BestFS {
                 // pruning as the queue yields better patterns
                 threshold = collector.getThreshold();
 
+                if (extList.ptwu < threshold - EPSILON) continue;
                 UPUList joined = joinTwoPointer(current, extList, extItem, threshold);
                 if (joined == null || joined.entryCount == 0) continue;
 

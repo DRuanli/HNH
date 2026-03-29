@@ -764,6 +764,7 @@ public class PTK_HUIM_DFS {
             if (extList == null) continue;
             threshold = collector.getThreshold();
 
+            if (extList.ptwu < threshold - EPSILON) continue;
             UPUList joined = joinTwoPointer(prefix, extList, extItem, threshold);
             if (joined == null || joined.entryCount == 0) continue;
 
