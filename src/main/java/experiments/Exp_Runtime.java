@@ -42,10 +42,10 @@ public class Exp_Runtime {
 
     private static final Map<String, int[]> K_VALUES = new LinkedHashMap<>();
     static {
-        K_VALUES.put("Chess",    new int[]{1, 10, 100, 500, 1000, 2000});
-        K_VALUES.put("Mushroom", new int[]{1, 10, 100, 500, 1000, 2000});
-        K_VALUES.put("Connect",  new int[]{1, 10, 100, 500, 1000, 2000});
-        K_VALUES.put("Retail",   new int[]{1, 10, 100, 500, 1000, 2000});
+        K_VALUES.put("Chess",    new int[]{10, 100, 1000, 5000, 10000, 20000});
+        K_VALUES.put("Mushroom", new int[]{10, 100, 1000, 5000, 10000, 20000});
+        K_VALUES.put("Retail",   new int[]{10, 100, 1000, 5000, 10000, 20000});
+        K_VALUES.put("Accidents",  new int[]{1, 10, 50, 100, 150, 200});
         K_VALUES.put("Kosarak",  new int[]{1, 10, 50, 100, 150, 200});
         K_VALUES.put("Pumsb",  new int[]{1, 10, 50, 100, 150, 200});
     }
