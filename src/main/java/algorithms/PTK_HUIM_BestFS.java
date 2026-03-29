@@ -21,7 +21,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *       pruning of low-potential nodes still waiting in the queue.</li>
  *   <li><b>Join strategy:</b>    Two-pointer merge with inline EU/PUB aggregation</li>
  *   <li><b>Top-K collector:</b>  Baseline (TreeSet min-heap + HashMap dedup)</li>
- *   <li><b>Parallelism:</b>      ForkJoin work-stealing (Phase 1a, 1d, 3)</li>
+ *   <li><b>Parallelism:</b>      ForkJoin work-stealing (Phase 3 only)</li>
  * </ul>
  *
  * <h3>Three-Phase Pipeline</h3>
@@ -60,9 +60,6 @@ public class PTK_HUIM_BestFS {
 
     /** Log-space floor to prevent denormalized underflow. */
     private static final double LOG_ZERO = -700.0;
-
-    /** Max transactions per ForkJoin leaf task (Phase 1a, 1d). */
-    private static final int LEAF_SIZE = 256;
 
     /** Prefix count threshold for fine-grain ForkJoin decomposition (Phase 3). */
     private static final int FINE_GRAIN_THRESHOLD = 32;
@@ -330,49 +327,6 @@ public class PTK_HUIM_BestFS {
     // Inner Classes - ForkJoin Tasks
     // =========================================================================
 
-    private final class Phase1Task extends RecursiveTask<double[]> {
-        final int from, to;
-        Phase1Task(int from, int to) { this.from = from; this.to = to; }
-
-        @Override
-        protected double[] compute() {
-            if (to - from <= LEAF_SIZE) {
-                double[] ptwu = new double[denseSize];
-                for (int i = from; i < to; i++)
-                    processTransactionPhase1(database.get(i), ptwu);
-                return ptwu;
-            }
-            int mid = (from + to) >>> 1;
-            Phase1Task left = new Phase1Task(from, mid);
-            Phase1Task right = new Phase1Task(mid, to);
-            left.fork();
-            double[] r = right.compute();
-            double[] l = left.join();
-            for (int i = 0; i < denseSize; i++) l[i] += r[i];
-            return l;
-        }
-    }
-
-    private final class EntryCollectionTask
-            extends RecursiveTask<Map<Integer, List<TransactionEntry>>> {
-        final int from, to;
-        EntryCollectionTask(int from, int to) { this.from = from; this.to = to; }
-
-        @Override
-        protected Map<Integer, List<TransactionEntry>> compute() {
-            if (to - from <= LEAF_SIZE) return collectEntriesRange(from, to);
-            int mid = (from + to) >>> 1;
-            EntryCollectionTask left = new EntryCollectionTask(from, mid);
-            EntryCollectionTask right = new EntryCollectionTask(mid, to);
-            left.fork();
-            Map<Integer, List<TransactionEntry>> r = right.compute();
-            Map<Integer, List<TransactionEntry>> l = left.join();
-            for (Map.Entry<Integer, List<TransactionEntry>> e : r.entrySet())
-                l.computeIfAbsent(e.getKey(), x -> new ArrayList<>()).addAll(e.getValue());
-            return l;
-        }
-    }
-
     private final class BestFSMiningTask extends RecursiveAction {
         final int rangeStart, rangeEnd;
         BestFSMiningTask(int start, int end) { this.rangeStart = start; this.rangeEnd = end; }
@@ -615,12 +569,8 @@ public class PTK_HUIM_BestFS {
 
     private void computePTWU() {
         densePTWU = new double[denseSize];
-        if (parallel && database.size() > LEAF_SIZE) {
-            densePTWU = pool.invoke(new Phase1Task(0, database.size()));
-        } else {
-            for (Transaction tx : database)
-                processTransactionPhase1(tx, densePTWU);
-        }
+        for (Transaction tx : database)
+            processTransactionPhase1(tx, densePTWU);
     }
 
     private void processTransactionPhase1(Transaction tx, double[] ptwu) {
@@ -669,9 +619,7 @@ public class PTK_HUIM_BestFS {
     // =========================================================================
 
     private void buildUPULists() {
-        Map<Integer, List<TransactionEntry>> itemEntries = (parallel && database.size() > LEAF_SIZE)
-                ? pool.invoke(new EntryCollectionTask(0, database.size()))
-                : collectEntriesRange(0, database.size());
+        Map<Integer, List<TransactionEntry>> itemEntries = collectEntriesRange(0, database.size());
 
         singleItemLists = new HashMap<>();
         for (int item : sortedItems) {
