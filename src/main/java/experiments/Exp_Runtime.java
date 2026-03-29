@@ -35,9 +35,10 @@ public class Exp_Runtime {
     private static final String[][] DATASETS = {
         {"Chess",    "src/data/chess_database.txt",    "src/data/chess_profit.txt"},
         {"Mushroom", "src/data/mushroom_database.txt", "src/data/mushroom_profit.txt"},
-        {"Connect",  "src/data/connect_database.txt",  "src/data/connect_profit.txt"},
+        {"Accidents",  "src/data/accidents_database.txt",  "src/data/accidents_profit.txt"},
         {"Retail",   "src/data/retail_database.txt",   "src/data/retail_profit.txt"},
         {"Kosarak",  "src/data/kosarak_database.txt",  "src/data/kosarak_profit.txt"},
+        {"Pumsb",  "src/data/pumsb_database.txt",  "src/data/pumsb_profit.txt"},
     };
 
     private static final Map<String, int[]> K_VALUES = new LinkedHashMap<>();
@@ -225,9 +226,8 @@ public class Exp_Runtime {
                 }
                 case "UTKU_PSO": {
                     UTKU_PSO algo = new UTKU_PSO(db, prof, tmpOut, k, PSO_POP_SIZE, PSO_ITERATIONS);
-                    algo.run();
-                    // Parse output to get pattern count and memory
-                    return parsePSOOutput(tmpOut);
+                    UTKU_PSO.MiningResult r = algo.run();
+                    return new Object[]{r.patternCount, r.memoryUsedMB};
                 }
                 default:
                     throw new IllegalArgumentException("Unknown algorithm: " + algoName);

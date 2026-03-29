@@ -23,7 +23,7 @@ import java.util.*;
  *   Profit file: one item per line
  *     itemId profit
  *
- * @author Elio (adapted from Simen Carstensen's TKU-PSO)
+ * @author Dang Nguyen Le
  */
 public class UTKU_PSO {
 
@@ -159,6 +159,42 @@ public class UTKU_PSO {
     }
 
     // =========================================================================
+    // Inner Classes - Result Model
+    // =========================================================================
+
+    /**
+     * Encapsulates the complete mining result for clean return from run().
+     * Mirrors PTK_HUIM's MiningResult for consistent experiment API.
+     */
+    public static final class MiningResult {
+        public final int patternCount;
+        public final double memoryUsedMB;
+        public final long executionTimeMs;
+        public final List<PatternEntry> patterns;
+
+        MiningResult(int patternCount, double memoryMB, long execMs,
+                     List<PatternEntry> patterns) {
+            this.patternCount = patternCount;
+            this.memoryUsedMB = memoryMB;
+            this.executionTimeMs = execMs;
+            this.patterns = patterns;
+        }
+    }
+
+    /**
+     * One discovered pattern — itemset + EU, for experiment comparison.
+     */
+    public static final class PatternEntry {
+        public final Set<Integer> items;
+        public final double expectedUtility;
+
+        PatternEntry(Set<Integer> items, double eu) {
+            this.items = items;
+            this.expectedUtility = eu;
+        }
+    }
+
+    // =========================================================================
     // Fields
     // =========================================================================
 
@@ -236,8 +272,10 @@ public class UTKU_PSO {
         String outFile = (args.length > 5) ? args[5] : "utku_pso_output.txt";
 
         UTKU_PSO algorithm = new UTKU_PSO(dbFile, profitFile, outFile, k, popSize, iters);
-        algorithm.run();
+        MiningResult result = algorithm.run();
         algorithm.printStats();
+        System.out.printf("Returned: %d patterns, %.2f MB%n",
+                result.patternCount, result.memoryUsedMB);
     }
 
     // =========================================================================
@@ -246,8 +284,10 @@ public class UTKU_PSO {
 
     /**
      * Runs the complete UTKU-PSO algorithm.
+     *
+     * @return MiningResult with pattern count, memory, time, and discovered patterns
      */
-    public void run() throws IOException {
+    public MiningResult run() throws IOException {
         maxMemory = 0;
         startTimestamp = System.currentTimeMillis();
 
@@ -309,6 +349,29 @@ public class UTKU_PSO {
         endTimestamp = System.currentTimeMillis();
         checkMemory();
         writeOutput();
+
+        return buildResult();
+    }
+
+    /**
+     * Builds the MiningResult from current solution state.
+     * Called after run() completes — always safe, even if writeOutput() fails.
+     */
+    private MiningResult buildResult() {
+        List<PatternEntry> patterns = new ArrayList<>();
+        for (Particle p : solutions.getSol()) {
+            Set<Integer> items = new LinkedHashSet<>();
+            for (int i = p.X.nextSetBit(0); i != -1; i = p.X.nextSetBit(i + 1)) {
+                items.add(itemNamesRev.get(i));
+            }
+            patterns.add(new PatternEntry(items, p.fitness));
+        }
+        return new MiningResult(
+                solutions.getSize(),
+                maxMemory,
+                endTimestamp - startTimestamp,
+                patterns
+        );
     }
 
     // =========================================================================

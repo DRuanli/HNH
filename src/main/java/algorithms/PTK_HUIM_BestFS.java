@@ -8,10 +8,6 @@ import java.util.concurrent.locks.ReentrantLock;
 /**
  * PTK-HUIM (BestFS): Exact Top-K High-Utility Itemset Mining on Uncertain Databases
  *
- * A standalone, self-contained implementation for mining the K itemsets with
- * highest Expected Utility (EU) from an uncertain transaction database where
- * items have positive or negative profits and probabilistic occurrence.
- *
  * <h3>Algorithm Configuration</h3>
  * <ul>
  *   <li><b>Search strategy:</b>  Best-First Search (BestFS) prefix-growth using a
@@ -47,7 +43,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *   Profits:  "itemId profit" per line (negative profits allowed)
  * </pre>
  *
- * @author Elio (flattened from PTK-HUIM clean architecture)
+ * @author Dang Nguyen Le
  */
 public class PTK_HUIM_BestFS {
 

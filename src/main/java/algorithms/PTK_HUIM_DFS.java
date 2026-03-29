@@ -6,18 +6,12 @@ import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * PTK-HUIM (DFS): Exact Top-K High-Utility Itemset Mining on Uncertain Databases
+ * PTK-HUIM (DFS): Top-K High-Utility Itemset Mining on Uncertain Databases with both positive and negative utilities
  *
- * A standalone, self-contained implementation for mining the K itemsets with
- * highest Expected Utility (EU) from an uncertain transaction database where
- * items have positive or negative profits and probabilistic occurrence.
  *
  * <h3>Algorithm Configuration</h3>
  * <ul>
  *   <li><b>Search strategy:</b>  Depth-First Search (DFS) prefix-growth</li>
- *   <li><b>Join strategy:</b>    Two-pointer merge with inline EU/PUB aggregation</li>
- *   <li><b>Top-K collector:</b>  Baseline (TreeSet min-heap + HashMap dedup)</li>
- *   <li><b>Parallelism:</b>      ForkJoin work-stealing (Phase 3 only)</li>
  * </ul>
  *
  * <h3>Three-Phase Pipeline</h3>
@@ -26,7 +20,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *       build single-item UPU-Lists</li>
  *   <li><b>Phase 2 - Initialization:</b> Evaluate 1-itemsets, seed the Top-K collector</li>
  *   <li><b>Phase 3 - Mining:</b> Recursive DFS prefix-growth with two-tier pruning:
- *       PTWU (monotone UB), PUB (tighter UB)</li>
+ *       PTWU, PUB</li>
  * </ol>
  *
  * <h3>Input Format</h3>
@@ -35,7 +29,7 @@ import java.util.concurrent.locks.ReentrantLock;
  *   Profits:  "itemId profit" per line (negative profits allowed)
  * </pre>
  *
- * @author Elio (flattened from PTK-HUIM clean architecture)
+ * @author Dang Nguyen Le
  */
 public class PTK_HUIM_DFS {
 
@@ -137,13 +131,6 @@ public class PTK_HUIM_DFS {
 
     /**
      * UPU-List: transactional projection of one itemset onto the database.
-     *
-     * Arrays are TID-sorted for O(n) two-pointer join. Pre-aggregated statistics
-     * (EU, PTWU, PUB) are computed during construction.
-     *
-     * <p>Probabilities are stored directly (not in log-space) to enable O(1)
-     * multiplication during joins instead of expensive Math.exp() calls.</p>
-     *
      * Immutable after construction - safe for concurrent reads in Phase 3.
      */
     private static final class UPUList {
@@ -259,9 +246,6 @@ public class PTK_HUIM_DFS {
 
     /**
      * Thread-safe Top-K pattern collector: TreeSet (EU ordering) + HashMap (dedup).
-     *
-     * Volatile threshold enables lock-free fast-path rejection.
-     * ReentrantLock guards all mutations for TreeSet/HashMap consistency.
      */
     private static final class TopKCollector {
         private final int capacity;
@@ -767,9 +751,6 @@ public class PTK_HUIM_DFS {
      * Two-tier pruning:
      *   1. PTWU - monotone upper bound (PTWU >= EU for all supersets), O(1)
      *   2. PUB  - tighter upper bound (PUB >= EU, closer to actual EU), O(1)
-     *
-     * Threshold refreshed after each successful collection and after each
-     * recursive subtree returns, enabling progressively more aggressive pruning.
      */
     private void exploreExtensions(UPUList prefix, int startIndex) {
         double threshold = collector.getThreshold();
@@ -809,9 +790,6 @@ public class PTK_HUIM_DFS {
     /**
      * Joins prefix UPU-List with single-item extension UPU-List.
      * O(|L1| + |L2|) two-pointer merge computing EU and PUB inline.
-     *
-     * <p><b>Optimization:</b> Probabilities are multiplied directly (prob1 × prob2)
-     * instead of computing exp(logP1 + logP2), eliminating all Math.exp() calls.</p>
      */
     private static UPUList joinTwoPointer(UPUList list1, UPUList list2,
                                            int extensionItem, double threshold) {

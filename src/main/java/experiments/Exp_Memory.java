@@ -12,8 +12,6 @@ import java.util.*;
 /**
  * Exp_Memory: Peak memory usage comparison of all algorithms.
  *
- * IEEE Access Section 6.D — generates data for memory usage figures.
- *
  * Protocol: For each (dataset, k, algorithm):
  *   - Force GC before run
  *   - Run algorithm, capture internal peak memory from MiningResult
@@ -27,25 +25,26 @@ import java.util.*;
  */
 public class Exp_Memory {
 
-    private static final double DEFAULT_MIN_PROB = 0.1;
     private static final int PSO_POP_SIZE = 20;
     private static final int PSO_ITERATIONS = 10000;
 
     private static final String[][] DATASETS = {
         {"Chess",    "src/data/chess_database.txt",    "src/data/chess_profit.txt"},
         {"Mushroom", "src/data/mushroom_database.txt", "src/data/mushroom_profit.txt"},
-        {"Connect",  "src/data/connect_database.txt",  "src/data/connect_profit.txt"},
+        {"Accidents",  "src/data/accidents_database.txt",  "src/data/accidents_profit.txt"},
         {"Retail",   "src/data/retail_database.txt",   "src/data/retail_profit.txt"},
         {"Kosarak",  "src/data/kosarak_database.txt",  "src/data/kosarak_profit.txt"},
+        {"Pumsb",  "src/data/pumsb_database.txt",  "src/data/pumsb_profit.txt"},
     };
 
     private static final Map<String, int[]> K_VALUES = new LinkedHashMap<>();
     static {
-        K_VALUES.put("Chess",    new int[]{1, 10, 100, 500, 1000, 2000});
-        K_VALUES.put("Mushroom", new int[]{1, 10, 100, 500, 1000, 2000});
-        K_VALUES.put("Connect",  new int[]{1, 10, 100, 500, 1000, 2000});
-        K_VALUES.put("Retail",   new int[]{1, 10, 50, 100, 150, 200});
+        K_VALUES.put("Chess",    new int[]{10, 100, 1000, 5000, 10000, 20000});
+        K_VALUES.put("Mushroom", new int[]{10, 100, 1000, 5000, 10000, 20000});
+        K_VALUES.put("Retail",   new int[]{10, 100, 1000, 5000, 10000, 20000});
+        K_VALUES.put("Accidents",  new int[]{1, 10, 50, 100, 150, 200});
         K_VALUES.put("Kosarak",  new int[]{1, 10, 50, 100, 150, 200});
+        K_VALUES.put("Pumsb",  new int[]{1, 10, 50, 100, 150, 200});
     }
 
     private static final String[] ALGO_NAMES = {"PTK_DFS", "PTK_BFS", "PTK_BestFS", "UTKU_PSO"};
@@ -177,10 +176,9 @@ public class Exp_Memory {
                 }
                 case "UTKU_PSO": {
                     UTKU_PSO algo = new UTKU_PSO(db, prof, tmpOut, k, PSO_POP_SIZE, PSO_ITERATIONS);
-                    algo.run();
-                    Object[] parsed = parsePSOOutput(tmpOut);
-                    mr.patternCount = (int) parsed[0];
-                    mr.peakMemoryMB = (double) parsed[1];
+                    UTKU_PSO.MiningResult r = algo.run();
+                    mr.peakMemoryMB = r.memoryUsedMB;
+                    mr.patternCount = r.patternCount;
                     break;
                 }
             }
