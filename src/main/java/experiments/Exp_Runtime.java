@@ -28,7 +28,6 @@ public class Exp_Runtime {
     // =========================================================================
     private static final int WARMUP_RUNS = 2;
     private static final int MEASURED_RUNS = 5;
-    private static final double DEFAULT_MIN_PROB = 0.1;
     private static final int PSO_POP_SIZE = 20;
     private static final int PSO_ITERATIONS = 10000;
 

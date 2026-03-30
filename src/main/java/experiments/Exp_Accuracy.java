@@ -23,8 +23,6 @@ import java.util.stream.Collectors;
  * Usage: java algorithms.Exp_Accuracy [--output-dir results/] [--min-prob 0.1]
  */
 public class Exp_Accuracy {
-
-    private static final double DEFAULT_MIN_PROB = 0.1;
     private static final int PSO_POP_SIZE = 20;
     private static final int PSO_ITERATIONS = 10000;
 
