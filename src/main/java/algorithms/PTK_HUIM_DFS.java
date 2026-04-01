@@ -40,9 +40,6 @@ public class PTK_HUIM_DFS {
     /** Floating-point comparison tolerance for threshold checks. */
     private static final double EPSILON = 1e-10;
 
-    /** Log-space floor to prevent denormalized underflow. */
-    private static final double LOG_ZERO = -700.0;
-
     /** Prefix count threshold for fine-grain ForkJoin decomposition (Phase 3). */
     private static final int FINE_GRAIN_THRESHOLD = 32;
 
@@ -85,14 +82,14 @@ public class PTK_HUIM_DFS {
         final int rank;
         final double profit;
         final double utility;
-        final double logProbability;
+        final double probability;
 
-        ItemInfo(int itemId, int rank, double profit, int quantity, double logProb) {
+        ItemInfo(int itemId, int rank, double profit, int quantity, double prob) {
             this.itemId = itemId;
             this.rank = rank;
             this.profit = profit;
             this.utility = profit * quantity;
-            this.logProbability = logProb;
+            this.probability = prob;
         }
 
         @Override
@@ -114,13 +111,13 @@ public class PTK_HUIM_DFS {
         final int tid;
         final double utility;
         final double remainingUtility;
-        final double logProbability;
+        final double probability;
 
-        TransactionEntry(int tid, double utility, double remaining, double logProb) {
+        TransactionEntry(int tid, double utility, double remaining, double prob) {
             this.tid = tid;
             this.utility = utility;
             this.remainingUtility = remaining;
-            this.logProbability = logProb;
+            this.probability = prob;
         }
 
         @Override
@@ -639,9 +636,9 @@ public class PTK_HUIM_DFS {
             double[] suffix = computeSuffixSums(infos);
             for (int j = 0; j < infos.size(); j++) {
                 ItemInfo info = infos.get(j);
-                if (info.logProbability > LOG_ZERO)
+                if (info.probability > 0)
                     result.computeIfAbsent(info.itemId, x -> new ArrayList<>())
-                            .add(new TransactionEntry(tx.tid, info.utility, suffix[j], info.logProbability));
+                            .add(new TransactionEntry(tx.tid, info.utility, suffix[j], info.probability));
             }
         }
         return result;
@@ -655,8 +652,7 @@ public class PTK_HUIM_DFS {
             double profit = profitTable.getOrDefault(item, 0.0);
             double prob = tx.getProbability(item);
             if (prob <= 0) continue;
-            double logP = Math.max(Math.log(prob), LOG_ZERO);
-            items.add(new ItemInfo(item, rank, profit, tx.getQuantity(item), logP));
+            items.add(new ItemInfo(item, rank, profit, tx.getQuantity(item), prob));
         }
         if (items.size() > 1) items.sort(null);
         return items;
@@ -685,7 +681,7 @@ public class PTK_HUIM_DFS {
             tids[i] = e.tid; utils[i] = e.utility;
             rem[i] = e.remainingUtility;
 
-            double prob = Math.exp(e.logProbability);
+            double prob = e.probability;
             probs[i] = prob;
             sumEU += e.utility * prob;
             double total = e.utility + e.remainingUtility;

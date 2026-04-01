@@ -720,21 +720,18 @@ public class UTKU_PSO {
 
             // Compute u(X, T) and P(X, T) for this transaction
             double transUtil = 0.0;
-            double logProb = 0.0; // log P(X, T) = Σ log P(i, T)
+            double prob = 1.0; // P(X, T) = Π P(i, T)
             int q = 0;
             int item = p.X.nextSetBit(0);
 
             while (item != -1 && q < trans.length) {
                 if (trans[q].item == item) {
                     transUtil += trans[q].utility;
-                    logProb += Math.log(trans[q].probability);
+                    prob *= trans[q].probability;
                     item = p.X.nextSetBit(item + 1);
                 }
                 q++;
             }
-
-            // P(X, T) = exp(logProb)
-            double prob = Math.exp(logProb);
 
             // EU accumulation
             eu += prob * transUtil;
